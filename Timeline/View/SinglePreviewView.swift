@@ -4,17 +4,25 @@ import AppKit
 struct SinglePreviewView: View {
     let clip: MediaClip
     let isFavorite: Bool
+    let overlaySettings: PreviewOverlaySettings
+    let initialSource: ImageSource
+    let isFloating: Bool
     var onDismiss: () -> Void
     var onNavigate: (CompareViewModel.NavDirection) -> Void
     var onCrossTrack: () -> Void
     var onTrash: () -> Void
     var onToggleFavorite: () -> Void
+    var onToggleFullScreen: () -> Void
+    var onToggleFloating: () -> Void
 
     @State private var zoom: Double = 1.0
+    /// "fraction of pane size" 形式存储 —— 渲染端 × pane_size × zoom 还原成 pt 偏移
     @State private var pan: CGSize = .zero
     @State private var pinchBase: Double?
     @State private var dragBase: CGSize?
+    @State private var paneSize: CGSize = .zero
     @State private var source: ImageSource
+    @FocusState private var focused: Bool
 
     private let minZoom: Double = 0.2
     private let maxZoom: Double = 8.0
@@ -22,39 +30,67 @@ struct SinglePreviewView: View {
     init(
         clip: MediaClip,
         isFavorite: Bool,
+        overlaySettings: PreviewOverlaySettings,
+        initialSource: ImageSource,
+        isFloating: Bool,
         onDismiss: @escaping () -> Void,
         onNavigate: @escaping (CompareViewModel.NavDirection) -> Void,
         onCrossTrack: @escaping () -> Void,
         onTrash: @escaping () -> Void,
-        onToggleFavorite: @escaping () -> Void
+        onToggleFavorite: @escaping () -> Void,
+        onToggleFullScreen: @escaping () -> Void,
+        onToggleFloating: @escaping () -> Void
     ) {
         self.clip = clip
         self.isFavorite = isFavorite
+        self.overlaySettings = overlaySettings
+        self.initialSource = initialSource
+        self.isFloating = isFloating
         self.onDismiss = onDismiss
         self.onNavigate = onNavigate
         self.onCrossTrack = onCrossTrack
         self.onTrash = onTrash
         self.onToggleFavorite = onToggleFavorite
-        self._source = State(initialValue: clip.defaultSource)
+        self.onToggleFullScreen = onToggleFullScreen
+        self.onToggleFloating = onToggleFloating
+        self._source = State(initialValue: initialSource)
     }
 
     var body: some View {
         VStack(spacing: 0) {
             topBar
             Divider()
-            ZStack(alignment: .topTrailing) {
-                ImagePane(
-                    url: clip.url(for: source),
-                    zoom: zoom,
-                    pan: pan
-                )
+            ZStack(alignment: .topLeading) {
+                GeometryReader { proxy in
+                    ImagePane(
+                        url: clip.url(for: source),
+                        zoom: zoom,
+                        pan: CGSize(
+                            width: pan.width * proxy.size.width * zoom,
+                            height: pan.height * proxy.size.height * zoom
+                        )
+                    )
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .onAppear { paneSize = proxy.size }
+                    .onChange(of: proxy.size) { _, new in paneSize = new }
+                }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .gesture(panGesture)
                 .gesture(magnifyGesture)
 
+                ExifOverlayBadge(
+                    clip: clip,
+                    settings: overlaySettings,
+                    sideLabel: nil
+                )
+                .padding(.top, 14)
+                .padding(.leading, 14)
+                .allowsHitTesting(false)
+
                 sourceBadge
                     .padding(.top, 12)
                     .padding(.trailing, 12)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
             }
             Divider()
             bottomBar
@@ -63,13 +99,19 @@ struct SinglePreviewView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.black)
         .focusable()
+        .focused($focused)
         .focusEffectDisabled()
+        .onAppear { focused = true }
+        // gesture 结束后强制把焦点拉回来，保证 J/R/方向键等 onKeyPress 持续响应
+        .onChange(of: pinchBase) { _, _ in focused = true }
+        .onChange(of: dragBase) { _, _ in focused = true }
         .onChange(of: clip.id) { _, _ in
             zoom = 1.0
             pan = .zero
             // 新 clip 不支持当前 source 时回退
             if source == .raw && clip.rawURL == nil { source = .jpg }
             if source == .jpg && clip.jpgURL == nil { source = .raw }
+            focused = true
         }
         .task(id: clip.id) {
             // 进入时同时预取两个源到磁盘缓存，切换瞬间出图
@@ -81,33 +123,46 @@ struct SinglePreviewView: View {
         .onKeyPress(.rightArrow) { onNavigate(.next); return .handled }
         .onKeyPress(.upArrow) { onCrossTrack(); return .handled }
         .onKeyPress(.downArrow) { onCrossTrack(); return .handled }
-        .onKeyPress(keys: ["j", "J"]) { _ in
-            if clip.jpgURL != nil { source = .jpg }
-            return .handled
-        }
-        .onKeyPress(keys: ["r", "R"]) { _ in
-            if clip.rawURL != nil { source = .raw }
-            return .handled
-        }
-        .onKeyPress(keys: ["f", "F"]) { _ in
-            onToggleFavorite()
-            return .handled
-        }
-        .onKeyPress(keys: ["="]) { _ in zoom = clamp(zoom * 1.25); return .handled }
-        .onKeyPress(keys: ["-"]) { _ in zoom = clamp(zoom * 0.8); return .handled }
-        .onKeyPress(keys: ["0"]) { _ in zoom = 1.0; pan = .zero; return .handled }
         .background {
+            // 这些"隐藏按钮 + keyboardShortcut"在 sheet 内是窗口级响应，
+            // 不依赖具体哪个 SwiftUI 视图持有焦点 —— 解决放大/拖动之后
+            // J/R 等 onKeyPress 失灵的问题。
             Group {
+                Button { if clip.jpgURL != nil { source = .jpg } } label: { EmptyView() }
+                    .keyboardShortcut("j", modifiers: [])
+                Button { if clip.jpgURL != nil { source = .jpg } } label: { EmptyView() }
+                    .keyboardShortcut("J", modifiers: [])
+                Button { if clip.rawURL != nil { source = .raw } } label: { EmptyView() }
+                    .keyboardShortcut("r", modifiers: [])
+                Button { if clip.rawURL != nil { source = .raw } } label: { EmptyView() }
+                    .keyboardShortcut("R", modifiers: [])
+                Button { onToggleFavorite() } label: { EmptyView() }
+                    .keyboardShortcut("f", modifiers: [])
+                Button { zoom = clamp(zoom * 1.25) } label: { EmptyView() }
+                    .keyboardShortcut("=", modifiers: [])
+                Button { zoom = clamp(zoom * 1.25) } label: { EmptyView() }
+                    .keyboardShortcut("+", modifiers: [])
                 Button { zoom = clamp(zoom * 1.25) } label: { EmptyView() }
                     .keyboardShortcut("=", modifiers: .command)
+                Button { zoom = clamp(zoom * 1.25) } label: { EmptyView() }
+                    .keyboardShortcut("+", modifiers: .command)
+                Button { zoom = clamp(zoom * 0.8) } label: { EmptyView() }
+                    .keyboardShortcut("-", modifiers: [])
                 Button { zoom = clamp(zoom * 0.8) } label: { EmptyView() }
                     .keyboardShortcut("-", modifiers: .command)
+                Button { zoom = 1.0; pan = .zero } label: { EmptyView() }
+                    .keyboardShortcut("0", modifiers: [])
                 Button { zoom = 1.0; pan = .zero } label: { EmptyView() }
                     .keyboardShortcut("0", modifiers: .command)
                 Button { onTrash() } label: { EmptyView() }
                     .keyboardShortcut(.delete, modifiers: .command)
-                Button { toggleHostFullScreen() } label: { EmptyView() }
+                Button { onToggleFullScreen() } label: { EmptyView() }
                     .keyboardShortcut("f", modifiers: [.command, .control])
+                // 更顺手的全屏快捷键：⇧F、反斜杠
+                Button { onToggleFullScreen() } label: { EmptyView() }
+                    .keyboardShortcut("F", modifiers: .shift)
+                Button { onToggleFullScreen() } label: { EmptyView() }
+                    .keyboardShortcut("\\", modifiers: [])
             }
             .opacity(0)
             .frame(width: 0, height: 0)
@@ -122,6 +177,7 @@ struct SinglePreviewView: View {
         Button {
             if canToggle {
                 source = (source == .jpg) ? .raw : .jpg
+                focused = true
             }
         } label: {
             HStack(spacing: 5) {
@@ -238,10 +294,16 @@ struct SinglePreviewView: View {
 
             Spacer()
 
-            Button { toggleHostFullScreen() } label: {
+            Button { onToggleFloating() } label: {
+                Image(systemName: isFloating ? "pin.fill" : "pin")
+                    .foregroundStyle(isFloating ? Color.accentColor : .white)
+            }
+            .help(isFloating ? "取消置顶" : "置顶（让预览窗浮在文档窗之上）")
+
+            Button { onToggleFullScreen() } label: {
                 Label("全屏", systemImage: "arrow.up.left.and.arrow.down.right")
             }
-            .help("全屏（⌃⌘F）")
+            .help("全屏（\\ 或 ⇧F 或 ⌃⌘F）")
 
             Button(role: .destructive) { onTrash() } label: {
                 Label("放入废纸篓", systemImage: "trash")
@@ -265,12 +327,19 @@ struct SinglePreviewView: View {
                 guard zoom > 1.01 else { return }
                 if dragBase == nil { dragBase = pan }
                 let base = dragBase ?? .zero
+                // pan 存"fraction of pane"，所以鼠标 delta 要除以 (pane * zoom)
+                let paneW = max(paneSize.width, 1)
+                let paneH = max(paneSize.height, 1)
+                let invZoom = 1.0 / max(zoom, 0.01)
                 pan = CGSize(
-                    width: base.width + value.translation.width,
-                    height: base.height + value.translation.height
+                    width: base.width + value.translation.width * invZoom / paneW,
+                    height: base.height + value.translation.height * invZoom / paneH
                 )
             }
-            .onEnded { _ in dragBase = nil }
+            .onEnded { _ in
+                dragBase = nil
+                focused = true
+            }
     }
 
     private var magnifyGesture: some Gesture {
@@ -280,7 +349,10 @@ struct SinglePreviewView: View {
                 let base = pinchBase ?? zoom
                 zoom = clamp(base * value.magnification)
             }
-            .onEnded { _ in pinchBase = nil }
+            .onEnded { _ in
+                pinchBase = nil
+                focused = true
+            }
     }
 
     private func clamp(_ z: Double) -> Double {
@@ -288,18 +360,25 @@ struct SinglePreviewView: View {
     }
 
     private func prefetchBothSources() async {
-        if let jpg = clip.jpgURL {
-            _ = await ThumbnailLoader.shared.thumbnail(for: jpg, sizeBucket: 2048)
-        }
-        if let raw = clip.rawURL {
-            _ = await ThumbnailLoader.shared.thumbnail(for: raw, sizeBucket: 2048)
+        // 缩略图（瞬时切源） + 高分图（J/R 切到的源放大不糊）
+        await withTaskGroup(of: Void.self) { group in
+            if let jpg = clip.jpgURL {
+                group.addTask {
+                    _ = await ThumbnailLoader.shared.thumbnail(for: jpg, sizeBucket: 2048)
+                }
+                group.addTask {
+                    _ = await FullImageLoader.shared.image(for: jpg)
+                }
+            }
+            if let raw = clip.rawURL {
+                group.addTask {
+                    _ = await ThumbnailLoader.shared.thumbnail(for: raw, sizeBucket: 2048)
+                }
+                group.addTask {
+                    _ = await FullImageLoader.shared.image(for: raw)
+                }
+            }
         }
     }
 
-    /// 让承载本 sheet 的宿主文档窗口进入/退出 macOS 全屏。
-    private func toggleHostFullScreen() {
-        var win = NSApp.keyWindow
-        while let parent = win?.parent { win = parent }
-        win?.toggleFullScreen(nil)
-    }
 }

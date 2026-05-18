@@ -39,9 +39,14 @@ nonisolated struct MediaClip: Identifiable, Hashable, Sendable {
         }
     }
 
-    /// 这张图默认应该用哪个源做预览
+    /// 单图预览默认用哪个源：优先 JPG（解码快、色彩贴近相机出片）
     var defaultSource: ImageSource {
         jpgURL != nil ? .jpg : .raw
+    }
+
+    /// AB 对比默认用哪个源：优先 RAW（要 pixel-peep 细节、判断画质差异）
+    var abDefaultSource: ImageSource {
+        rawURL != nil ? .raw : .jpg
     }
 }
 

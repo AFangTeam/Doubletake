@@ -21,6 +21,29 @@ final class CompareViewModel {
     /// 跳转日期请求：CompareDocumentView 设置，TimelineView 监听并滚到该日期
     var pendingScrollDate: Date?
 
+    /// 在预览窗里翻图时同步要求主文档 timeline 把这张图滚到视口中心。
+    /// pendingScrollDate 是按"日期"跳，这个是按"具体 clip"跳，两个通道互不冲突。
+    var requestedScrollClipID: ClipID?
+
+    /// 顶层（CompareDocumentView）发起的 timeline 操作请求 —— 例如
+    /// ⌘= 缩放、⌘0 适配、⌘← 跳到开头等。
+    /// TimelineView 用 `.onChange(of: vm.pendingTimelineAction)` 监听并执行。
+    /// 用 UUID 强迫每次都触发 onChange，即使相同动作连按。
+    struct TimelineActionRequest: Equatable, Sendable {
+        let token: UUID
+        let action: Action
+
+        enum Action: String, Equatable, Sendable {
+            case zoomIn, zoomOut, fitAll, scrollToStart, scrollToEnd
+        }
+
+        init(_ action: Action) {
+            self.token = UUID()
+            self.action = action
+        }
+    }
+    var pendingTimelineAction: TimelineActionRequest?
+
     enum NavDirection { case prev, next }
 
     struct TrashResult: Sendable {
@@ -76,6 +99,23 @@ final class CompareViewModel {
         case .prev: return idx > 0 ? list[idx - 1] : nil
         case .next: return idx < list.count - 1 ? list[idx + 1] : nil
         }
+    }
+
+    /// 跳到一次保存过的 AB 对比：选中两张图、把 timeline 滚到中点日期。
+    /// 返回 (a, b) 让调用方接着进 AB 预览；返回 nil 表示原始 clip 已经不存在。
+    func jumpToComparison(_ c: SavedComparison, in document: CompareDocument) -> (a: ClipID, b: ClipID)? {
+        guard let aID = ClipID(serialized: c.clipAIDSerialized),
+              let bID = ClipID(serialized: c.clipBIDSerialized),
+              let ca = clip(for: aID),
+              let cb = clip(for: bID)
+        else { return nil }
+
+        selection = [aID, bID]
+        selectionAnchor = aID
+        let mid = Date(timeIntervalSince1970:
+            (ca.captureDate.timeIntervalSince1970 + cb.captureDate.timeIntervalSince1970) / 2)
+        pendingScrollDate = mid
+        return (aID, bID)
     }
 
     /// 跨轨：在另一条轨道里找按 effectiveDate（含时间偏移）最接近当前 clip 的那张

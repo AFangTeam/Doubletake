@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct CompareDocumentView: View {
     @Binding var document: CompareDocument
+    @Environment(PreferencesStore.self) private var prefs
     @State private var vm = CompareViewModel()
     @State private var inspectorPresented: Bool = true
 
@@ -17,10 +18,41 @@ struct CompareDocumentView: View {
         case ab(ClipID, ClipID)
     }
 
+    // 独立预览窗口控制器 —— 用 AppKit NSWindow 装预览/对比视图，
+    // 这样全屏、置顶（.floating）都是真正的 macOS 窗口行为，互不干扰主文档窗。
+    @State private var previewCtrl = PreviewWindowController()
+    @State private var previewFloating: Bool = false
+
     @State private var jumpPopoverPresented: Bool = false
     @State private var exportFolderImporter: Bool = false
     @State private var exportResult: FavoritesExportResult?
     @State private var exportError: String?
+
+    // AB 对比的保存：用户先点 "保存对比" → 在 ABCompareView 里填名字 + 拿到截图 →
+    // 我们再起 fileImporter 让用户选父文件夹 → 写盘。
+    @State private var pendingABSave: PendingABSave?
+    @State private var abSaveFolderImporter: Bool = false
+    @State private var abSaveResult: ABComparisonResult?
+    @State private var abSaveError: String?
+
+    private struct PendingABSave: Equatable {
+        let name: String
+        let clipAID: ClipID
+        let clipBID: ClipID
+        let comparisonImage: CGImageBox
+        let originalComparisonImage: CGImageBox
+        let info: ABComparisonInfo
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.name == rhs.name && lhs.clipAID == rhs.clipAID && lhs.clipBID == rhs.clipBID
+        }
+    }
+
+    /// CGImage 不是 Equatable —— 包一层让 PendingABSave 能合成 Equatable
+    private final class CGImageBox: @unchecked Sendable {
+        let image: CGImage?
+        init(_ image: CGImage?) { self.image = image }
+    }
 
     private var favoriteCount: Int { vm.favoriteCount(in: document) }
 
@@ -28,16 +60,16 @@ struct CompareDocumentView: View {
         timelineArea
             .frame(minWidth: 880, minHeight: 520)
             .inspector(isPresented: $inspectorPresented) {
-                InspectorView(document: $document, vm: vm)
-                    .inspectorColumnWidth(min: 300, ideal: 360, max: 480)
+                InspectorView(
+                    document: $document,
+                    vm: vm,
+                    onJumpToComparison: { jumpToSavedComparison($0) }
+                )
+                .inspectorColumnWidth(min: 300, ideal: 360, max: 480)
             }
             .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    jumpToDateButton
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    exportFavoritesButton
-                }
+                ToolbarItem(placement: .primaryAction) { jumpToDateButton }
+                ToolbarItem(placement: .primaryAction) { exportFavoritesButton }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
                         requestPreview()
@@ -61,14 +93,18 @@ struct CompareDocumentView: View {
             .task(id: document.bookmarkB) {
                 await vm.applyBookmark(document.bookmarkB, for: .b)
             }
+            .onAppear {
+                previewCtrl.onClose = { preview = nil }
+            }
             .onDisappear {
                 vm.releaseAllScopes()
+                previewCtrl.dismiss()
             }
-            .sheet(isPresented: Binding(
-                get: { preview != nil },
-                set: { if !$0 { preview = nil } }
-            )) {
-                previewSheet
+            .onChange(of: preview) { _, newValue in
+                syncPreviewWindow(state: newValue)
+            }
+            .onChange(of: previewFloating) { _, _ in
+                previewCtrl.setFloating(previewFloating)
             }
             .onChange(of: vm.selection) { _, _ in
                 // 选区变化导致当前 preview 不再有效则自动关闭
@@ -76,6 +112,12 @@ struct CompareDocumentView: View {
                     preview = nil
                 }
             }
+            // 切片 / 翻图 / Inspector 跳转触发预览窗内容更新
+            .onChange(of: document.payload.overlaySettings) { _, _ in pushPreviewRefresh() }
+            // 红心收藏变了 —— 预览窗右上角的心形需要从"空心"变"红色实心"
+            .onChange(of: document.payload.favoriteClipIDs) { _, _ in pushPreviewRefresh() }
+            // PreferencesStore 里的叠加信息开关变了，预览窗也要重渲染
+            .onChange(of: prefs.overlay) { _, _ in pushPreviewRefresh() }
             .fileImporter(
                 isPresented: $exportFolderImporter,
                 allowedContentTypes: [.folder],
@@ -83,43 +125,114 @@ struct CompareDocumentView: View {
             ) { result in
                 handleExportFolder(result)
             }
-            .alert("导出完成", isPresented: Binding(
-                get: { exportResult != nil },
-                set: { if !$0 { exportResult = nil } }
-            )) {
-                Button("在 Finder 中显示") {
-                    if let url = exportResult?.destinationFolder {
-                        NSWorkspace.shared.activateFileViewerSelecting([url])
-                    }
-                    exportResult = nil
-                }
-                Button("好") { exportResult = nil }
-            } message: {
-                if let r = exportResult {
-                    Text("拷贝了 \(r.copiedFiles) 个文件，跳过 \(r.skipped) 个，错误 \(r.errors.count) 个。")
-                }
+            .fileImporter(
+                isPresented: $abSaveFolderImporter,
+                allowedContentTypes: [.folder],
+                allowsMultipleSelection: false
+            ) { result in
+                handleABSaveFolder(result)
             }
-            .alert("导出失败", isPresented: Binding(
-                get: { exportError != nil },
-                set: { if !$0 { exportError = nil } }
-            )) {
-                Button("好") { exportError = nil }
-            } message: {
-                Text(exportError ?? "")
-            }
+            .modifier(AlertsModifier(
+                exportResult: $exportResult,
+                exportError: $exportError,
+                abSaveResult: $abSaveResult,
+                abSaveError: $abSaveError
+            ))
+            .background { shortcutButtons }
+    }
+
+    @ViewBuilder
+    private var shortcutButtons: some View {
+        Group {
+            Button { vm.pendingTimelineAction = CompareViewModel.TimelineActionRequest(.zoomIn) } label: { EmptyView() }
+                .keyboardShortcut("=", modifiers: .command)
+            Button { vm.pendingTimelineAction = CompareViewModel.TimelineActionRequest(.zoomIn) } label: { EmptyView() }
+                .keyboardShortcut("+", modifiers: .command)
+            Button { vm.pendingTimelineAction = CompareViewModel.TimelineActionRequest(.zoomOut) } label: { EmptyView() }
+                .keyboardShortcut("-", modifiers: .command)
+            Button { vm.pendingTimelineAction = CompareViewModel.TimelineActionRequest(.fitAll) } label: { EmptyView() }
+                .keyboardShortcut("0", modifiers: .command)
+            Button { vm.pendingTimelineAction = CompareViewModel.TimelineActionRequest(.scrollToStart) } label: { EmptyView() }
+                .keyboardShortcut(.leftArrow, modifiers: .command)
+            Button { vm.pendingTimelineAction = CompareViewModel.TimelineActionRequest(.scrollToEnd) } label: { EmptyView() }
+                .keyboardShortcut(.rightArrow, modifiers: .command)
+            Button { jumpPopoverPresented = true } label: { EmptyView() }
+                .keyboardShortcut("j", modifiers: .command)
+                .disabled(vm.dateRange(in: document) == nil)
+            Button { exportFolderImporter = true } label: { EmptyView() }
+                .keyboardShortcut("e", modifiers: .command)
+                .disabled(favoriteCount == 0)
+            Button { requestPreview() } label: { EmptyView() }
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(!canPreview)
+            Button { inspectorPresented.toggle() } label: { EmptyView() }
+                .keyboardShortcut("i", modifiers: .command)
+        }
+        .opacity(0)
+        .frame(width: 0, height: 0)
     }
 
     @ViewBuilder
     private var timelineArea: some View {
-        if vm.trackA.clips.isEmpty && vm.trackB.clips.isEmpty {
-            emptyOrLoadingState
-        } else {
-            TimelineView(
-                document: $document,
-                vm: vm,
-                onRequestPreview: { requestPreview() }
+        VStack(spacing: 0) {
+            // 顶部按日期 chip 切片 —— 跨日素材时才显示
+            DateChipStrip(
+                days: availableDays,
+                currentVisibleDay: currentVisibleDay,
+                onSelect: { day in
+                    vm.pendingScrollDate = day
+                }
             )
+
+            if vm.trackA.clips.isEmpty && vm.trackB.clips.isEmpty {
+                emptyOrLoadingState
+            } else {
+                TimelineView(
+                    document: $document,
+                    vm: vm,
+                    onRequestPreview: { requestPreview() }
+                )
+            }
         }
+    }
+
+    // MARK: - 日期 chip 数据
+
+    private var availableDays: [Date] {
+        let cal = Calendar.current
+        let offsetA = document.payload.trackA.timeOffsetSeconds
+        let offsetB = document.payload.trackB.timeOffsetSeconds
+        let allDates = vm.trackA.clips.map { $0.captureDate.addingTimeInterval(offsetA) }
+                     + vm.trackB.clips.map { $0.captureDate.addingTimeInterval(offsetB) }
+        var seen = Set<Date>()
+        for d in allDates { seen.insert(cal.startOfDay(for: d)) }
+        return seen.sorted()
+    }
+
+    /// 当前 timeline 视口中心对应的"那一天"，用于 chip 高亮
+    private var currentVisibleDay: Date? {
+        guard let anchorEpoch = document.payload.viewState.scrollAnchorEpoch else { return nil }
+        return Calendar.current.startOfDay(for: Date(timeIntervalSince1970: anchorEpoch))
+    }
+
+    private func jumpToSavedComparison(_ c: SavedComparison) {
+        // 只滚动 + 选中两张，不直接弹预览 —— 用户可以再按 Space / 工具栏的 AB 按钮
+        // 进入对比。这样列表跳转更轻量、可控
+        guard vm.jumpToComparison(c, in: document) != nil else {
+            abSaveError = "原始素材已不存在，无法跳转到这次对比。"
+            return
+        }
+    }
+
+    /// 给保存的对比一行紧凑摘要，列表项里附带显示
+    private func shortSummary(of clip: MediaClip) -> String {
+        var parts: [String] = []
+        if let lens = clip.metadata.lensModel { parts.append(lens) }
+        if let f = clip.metadata.focalLengthDisplay { parts.append(f) }
+        if let a = clip.metadata.apertureDisplay { parts.append(a) }
+        if parts.isEmpty, let cam = clip.metadata.cameraModel { parts.append(cam) }
+        if parts.isEmpty { parts.append(clip.displayName) }
+        return parts.joined(separator: " ")
     }
 
     // MARK: - 预览触发
@@ -151,36 +264,79 @@ struct CompareDocumentView: View {
         }
     }
 
+    // MARK: - 独立预览窗口
+
+    private func syncPreviewWindow(state: PreviewState?) {
+        guard let state else {
+            previewCtrl.dismiss()
+            return
+        }
+        let title = previewTitle(for: state)
+        let view = previewContent(for: state)
+        previewCtrl.present(view, title: title)
+        previewCtrl.setFloating(previewFloating)
+    }
+
+    private func pushPreviewRefresh() {
+        guard let state = preview else { return }
+        syncPreviewWindow(state: state)
+    }
+
+    private func previewTitle(for state: PreviewState) -> String {
+        switch state {
+        case .single(let id):
+            return vm.clip(for: id)?.displayName ?? "预览"
+        case .ab(let a, let b):
+            let na = vm.clip(for: a)?.displayName ?? "A"
+            let nb = vm.clip(for: b)?.displayName ?? "B"
+            return "\(na)  vs  \(nb)"
+        }
+    }
+
     @ViewBuilder
-    private var previewSheet: some View {
-        switch preview {
+    private func previewContent(for state: PreviewState) -> some View {
+        switch state {
         case .single(let id):
             if let clip = vm.clip(for: id) {
                 SinglePreviewView(
                     clip: clip,
                     isFavorite: vm.isFavorite(id, in: document),
+                    overlaySettings: prefs.overlay,
+                    initialSource: prefs.defaultSource(forSingle: clip),
+                    isFloating: previewFloating,
                     onDismiss: { preview = nil },
                     onNavigate: { direction in
                         if let next = vm.neighbor(of: id, direction: direction) {
                             preview = .single(next.id)
                             vm.selectOnly(next.id)
+                            // 主文档 timeline 同步滚到这张图，关掉预览后那张就在中心
+                            vm.requestedScrollClipID = next.id
                         }
                     },
                     onCrossTrack: {
                         if let other = vm.crossTrackNeighbor(of: id, in: document) {
                             preview = .single(other.id)
                             vm.selectOnly(other.id)
+                            vm.requestedScrollClipID = other.id
                         }
                     },
                     onTrash: { trashFromPreview(currentID: id) },
-                    onToggleFavorite: { vm.toggleFavorite(id, in: &document) }
+                    onToggleFavorite: { vm.toggleFavorite(id, in: &document) },
+                    onToggleFullScreen: { previewCtrl.toggleFullScreen() },
+                    onToggleFloating: { previewFloating.toggle() }
                 )
+            } else {
+                EmptyView()
             }
         case .ab(let aID, let bID):
             if let a = vm.clip(for: aID), let b = vm.clip(for: bID) {
                 ABCompareView(
                     clipA: a,
                     clipB: b,
+                    overlaySettings: prefs.overlay,
+                    initialSourceA: prefs.defaultSource(forAB: a),
+                    initialSourceB: prefs.defaultSource(forAB: b),
+                    isFloating: previewFloating,
                     onDismiss: { preview = nil },
                     onNavigate: { direction in
                         let nextA = vm.neighbor(of: aID, direction: direction) ?? a
@@ -188,11 +344,25 @@ struct CompareDocumentView: View {
                         preview = .ab(nextA.id, nextB.id)
                         vm.selection = [nextA.id, nextB.id]
                         vm.selectionAnchor = nextA.id
-                    }
+                        vm.requestedScrollClipID = nextA.id
+                    },
+                    onSaveComparison: { name, image, originalImage, info in
+                        pendingABSave = PendingABSave(
+                            name: name,
+                            clipAID: aID,
+                            clipBID: bID,
+                            comparisonImage: CGImageBox(image),
+                            originalComparisonImage: CGImageBox(originalImage),
+                            info: info
+                        )
+                        abSaveFolderImporter = true
+                    },
+                    onToggleFullScreen: { previewCtrl.toggleFullScreen() },
+                    onToggleFloating: { previewFloating.toggle() }
                 )
+            } else {
+                EmptyView()
             }
-        case .none:
-            EmptyView()
         }
     }
 
@@ -234,16 +404,19 @@ struct CompareDocumentView: View {
 
     private func trashFromPreview(currentID: ClipID) {
         guard let clip = vm.clip(for: currentID) else { return }
-        // 决定删除后跳到哪张：先看下一张，没有就看上一张，再没有就关闭预览
         let next = vm.neighbor(of: currentID, direction: .next)
             ?? vm.neighbor(of: currentID, direction: .prev)
-        _ = vm.trash([clip], in: &document)
         if let next {
             preview = .single(next.id)
             vm.selectOnly(next.id)
+            // 删完后让背后 timeline 也滚到 next，关掉预览看到的就是 next，而不是被删
+            // 的那张原先位置（"从头"感）
+            vm.requestedScrollClipID = next.id
         } else {
             preview = nil
+            vm.clearSelection()
         }
+        _ = vm.trash([clip], in: &document)
     }
 
     private func handleExportFolder(_ result: Result<[URL], Error>) {
@@ -261,6 +434,53 @@ struct CompareDocumentView: View {
             }
         case .failure(let error):
             exportError = error.localizedDescription
+        }
+    }
+
+    private func handleABSaveFolder(_ result: Result<[URL], Error>) {
+        defer { pendingABSave = nil }
+        guard let pending = pendingABSave else { return }
+        switch result {
+        case .success(let urls):
+            guard let folder = urls.first else { return }
+            guard let clipA = vm.clip(for: pending.clipAID),
+                  let clipB = vm.clip(for: pending.clipBID) else {
+                abSaveError = "选中的 AB 素材已不存在"
+                return
+            }
+            let started = folder.startAccessingSecurityScopedResource()
+            defer { if started { folder.stopAccessingSecurityScopedResource() } }
+
+            let infoData: Data? = {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                return try? encoder.encode(pending.info)
+            }()
+
+            do {
+                let res = try ABComparisonSaver.save(
+                    name: pending.name,
+                    parentFolder: folder,
+                    clipA: clipA,
+                    clipB: clipB,
+                    comparisonImage: pending.comparisonImage.image,
+                    originalComparisonImage: pending.originalComparisonImage.image,
+                    infoJSON: infoData
+                )
+                abSaveResult = res
+                let entry = SavedComparison(
+                    name: pending.name,
+                    clipAIDSerialized: pending.clipAID.serialized,
+                    clipBIDSerialized: pending.clipBID.serialized,
+                    summaryA: shortSummary(of: clipA),
+                    summaryB: shortSummary(of: clipB)
+                )
+                document.payload.savedComparisons.append(entry)
+            } catch {
+                abSaveError = error.localizedDescription
+            }
+        case .failure(let error):
+            abSaveError = error.localizedDescription
         }
     }
 
@@ -289,6 +509,69 @@ struct CompareDocumentView: View {
     }
 }
 
+/// 一组顶层 alert 拆出来当 ViewModifier，否则 CompareDocumentView.body 太长，
+/// Swift 编译器会报"unable to type-check this expression in reasonable time"。
+private struct AlertsModifier: ViewModifier {
+    @Binding var exportResult: FavoritesExportResult?
+    @Binding var exportError: String?
+    @Binding var abSaveResult: ABComparisonResult?
+    @Binding var abSaveError: String?
+
+    func body(content: Content) -> some View {
+        content
+            .alert("导出完成", isPresented: Binding(
+                get: { exportResult != nil },
+                set: { if !$0 { exportResult = nil } }
+            )) {
+                Button("在 Finder 中显示") {
+                    if let url = exportResult?.destinationFolder {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    }
+                    exportResult = nil
+                }
+                Button("好") { exportResult = nil }
+            } message: {
+                if let r = exportResult {
+                    Text("拷贝了 \(r.copiedFiles) 个文件，跳过 \(r.skipped) 个，错误 \(r.errors.count) 个。")
+                }
+            }
+            .alert("导出失败", isPresented: Binding(
+                get: { exportError != nil },
+                set: { if !$0 { exportError = nil } }
+            )) {
+                Button("好") { exportError = nil }
+            } message: {
+                Text(exportError ?? "")
+            }
+            .alert("AB 对比已保存", isPresented: Binding(
+                get: { abSaveResult != nil },
+                set: { if !$0 { abSaveResult = nil } }
+            )) {
+                Button("在 Finder 中显示") {
+                    if let url = abSaveResult?.outputFolder {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    }
+                    abSaveResult = nil
+                }
+                Button("好") { abSaveResult = nil }
+            } message: {
+                if let r = abSaveResult {
+                    let count = (r.wroteComparisonImage ? 1 : 0) + (r.wroteOriginalComparisonImage ? 1 : 0)
+                    Text("写入 \(count) 张对比截图，拷贝 \(r.copiedFiles) 个原文件，错误 \(r.errors.count) 个。")
+                }
+            }
+            .alert("AB 对比保存失败", isPresented: Binding(
+                get: { abSaveError != nil },
+                set: { if !$0 { abSaveError = nil } }
+            )) {
+                Button("好") { abSaveError = nil }
+            } message: {
+                Text(abSaveError ?? "")
+            }
+    }
+}
+
 #Preview {
     CompareDocumentView(document: .constant(CompareDocument()))
+        .environment(PreferencesStore())
 }

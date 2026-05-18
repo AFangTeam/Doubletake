@@ -4,6 +4,8 @@ import UniformTypeIdentifiers
 struct InspectorView: View {
     @Binding var document: CompareDocument
     let vm: CompareViewModel
+    /// 点击对比集列表项时跳转：选中两张图 + 滚 timeline + 起 AB 预览
+    var onJumpToComparison: (SavedComparison) -> Void
 
     var body: some View {
         Form {
@@ -30,8 +32,134 @@ struct InspectorView: View {
             Section("B 轨（机型 2）") {
                 TrackInspectorRow(document: $document, vm: vm, track: .b)
             }
+
+            if !document.payload.savedComparisons.isEmpty {
+                Section("对比集 (\(document.payload.savedComparisons.count))") {
+                    SavedComparisonsList(
+                        comparisons: document.payload.savedComparisons,
+                        onJump: { onJumpToComparison($0) },
+                        onDelete: { c in
+                            document.payload.savedComparisons.removeAll { $0.id == c.id }
+                        },
+                        onRename: { c, newName in
+                            if let idx = document.payload.savedComparisons.firstIndex(where: { $0.id == c.id }) {
+                                document.payload.savedComparisons[idx].name = newName
+                            }
+                        }
+                    )
+                }
+            }
         }
         .formStyle(.grouped)
+    }
+}
+
+// MARK: - 对比集列表
+
+private struct SavedComparisonsList: View {
+    let comparisons: [SavedComparison]
+    let onJump: (SavedComparison) -> Void
+    let onDelete: (SavedComparison) -> Void
+    let onRename: (SavedComparison, String) -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(comparisons.enumerated()), id: \.element.id) { idx, c in
+                ComparisonRow(
+                    comparison: c,
+                    onJump: { onJump(c) },
+                    onDelete: { onDelete(c) },
+                    onRename: { newName in onRename(c, newName) }
+                )
+                if idx < comparisons.count - 1 {
+                    Divider().padding(.leading, 28)
+                }
+            }
+        }
+    }
+}
+
+private struct ComparisonRow: View {
+    let comparison: SavedComparison
+    let onJump: () -> Void
+    let onDelete: () -> Void
+    let onRename: (String) -> Void
+
+    @State private var renamePopover = false
+    @State private var renameDraft = ""
+
+    var body: some View {
+        Button(action: onJump) {
+            HStack(spacing: 8) {
+                Image(systemName: "rectangle.split.2x1")
+                    .foregroundStyle(.tint)
+                    .font(.caption)
+                    .frame(width: 18)
+                Text(comparison.name)
+                    .font(.callout)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer()
+                Text(relativeTime(from: comparison.createdAtEpoch))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
+            .padding(.vertical, 4)
+        }
+        .buttonStyle(.plain)
+        .help("跳转到这次对比")
+        .contextMenu {
+            Button("重命名…") {
+                renameDraft = comparison.name
+                renamePopover = true
+            }
+            Divider()
+            Button("删除", role: .destructive) { onDelete() }
+        }
+        .popover(isPresented: $renamePopover) {
+            renameForm
+        }
+    }
+
+    @ViewBuilder
+    private var renameForm: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("重命名对比")
+                .font(.headline)
+            TextField("名字", text: $renameDraft)
+                .textFieldStyle(.roundedBorder)
+                .frame(minWidth: 260)
+                .onSubmit { commit() }
+            HStack {
+                Spacer()
+                Button("取消") { renamePopover = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("保存") { commit() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(renameDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(12)
+        .frame(width: 320)
+    }
+
+    private func commit() {
+        let trimmed = renameDraft.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty {
+            onRename(trimmed)
+        }
+        renamePopover = false
+    }
+
+    private func relativeTime(from epoch: Double) -> String {
+        let date = Date(timeIntervalSince1970: epoch)
+        let f = RelativeDateTimeFormatter()
+        f.locale = Locale.current
+        f.dateTimeStyle = .named
+        f.unitsStyle = .short
+        return f.localizedString(for: date, relativeTo: Date())
     }
 }
 
@@ -195,7 +323,7 @@ private struct MultiSelectionSummary: View {
             .font(.caption)
 
             if countA == 1 && countB == 1 {
-                Text("准备 AB 对比 — 按 Space 进入（Step 8 接入）")
+                Text("准备 AB 对比 — 按 Space 进入")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .padding(.top, 2)
@@ -372,5 +500,4 @@ private struct TrackInspectorRow: View {
             break
         }
     }
-
 }
