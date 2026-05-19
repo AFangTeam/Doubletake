@@ -4,6 +4,7 @@ import SwiftUI
 /// 独立的预览窗口管理器。SwiftUI 的 `.sheet` / ZStack overlay 都会让"全屏"等
 /// macOS 窗口行为受限，干脆走 AppKit：一个 NSWindow 装 NSHostingController，
 /// 完全独立于主文档窗口，支持单独全屏 + 浮窗 (floating window level)。
+/// 关闭后位置 / 大小持久化（UserDefaults），下次打开在同位置同大小。
 @MainActor
 final class PreviewWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
@@ -11,8 +12,9 @@ final class PreviewWindowController: NSObject, NSWindowDelegate {
     private var floating: Bool = false
     /// 用户关掉窗口时回调，CompareDocumentView 借此把 preview state 清空。
     var onClose: (() -> Void)?
-    /// 当前窗口是否处于 floating 状态（图钉"置顶"）
     var isFloating: Bool { floating }
+
+    private static let savedFrameKey = "previewWindow.frame"
 
     /// 显示 / 更新预览内容。若窗口已存在，**整个换掉 NSHostingController**，
     /// 而不是只替换 rootView —— 因为只换 rootView 会让 SwiftUI 的 keyboardShortcut
@@ -48,11 +50,18 @@ final class PreviewWindowController: NSObject, NSWindowDelegate {
         w.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
         w.titlebarAppearsTransparent = true
         w.titleVisibility = .visible
-        w.setContentSize(NSSize(width: 1200, height: 800))
-        w.center()
         w.collectionBehavior = [.fullScreenPrimary]
         w.isReleasedWhenClosed = false
         w.delegate = self
+
+        // 先放上次记录的位置 / 大小；没有记录则给个 1200x800 居中
+        if let restored = Self.loadSavedFrame() {
+            w.setFrame(restored, display: false)
+        } else {
+            w.setContentSize(NSSize(width: 1200, height: 800))
+            w.center()
+        }
+
         w.makeKeyAndOrderFront(nil)
         DispatchQueue.main.async { [weak w, weak host] in
             guard let w, let host else { return }
@@ -77,10 +86,41 @@ final class PreviewWindowController: NSObject, NSWindowDelegate {
 
     // MARK: - NSWindowDelegate
 
+    func windowDidResize(_ notification: Notification) {
+        saveFrame()
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        saveFrame()
+    }
+
     func windowWillClose(_ notification: Notification) {
+        saveFrame()
         onClose?()
         window = nil
         hosting = nil
         floating = false
+    }
+
+    // MARK: - Frame persistence
+
+    private func saveFrame() {
+        guard let w = window else { return }
+        // 全屏 / 最小化时的 frame 不存，避免下次开窗诡异
+        guard !w.styleMask.contains(.fullScreen), !w.isMiniaturized else { return }
+        let s = NSStringFromRect(w.frame)
+        UserDefaults.standard.set(s, forKey: Self.savedFrameKey)
+    }
+
+    private static func loadSavedFrame() -> NSRect? {
+        guard let s = UserDefaults.standard.string(forKey: savedFrameKey) else { return nil }
+        let rect = NSRectFromString(s)
+        // 校验 rect 合法（屏幕可能被拔了）
+        guard rect.width > 200, rect.height > 200 else { return nil }
+        // 验证至少有屏幕能容纳它
+        for screen in NSScreen.screens {
+            if screen.visibleFrame.intersects(rect) { return rect }
+        }
+        return nil
     }
 }

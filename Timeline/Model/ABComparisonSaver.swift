@@ -13,9 +13,11 @@ struct ABComparisonResult: Sendable {
 }
 
 /// 把一次 AB 对比（两张原图 + 当前画面对比截图 + 未调整状态的对比截图）写到
-/// 一个用户命名的文件夹。
-/// - `comparison.png`：用户当下看到的画面（带 zoom、⌘+拖动的位移）
-/// - `original_comparison.png`：两张图未经任何调整，平摆左右（zoom=1，无位移）
+/// 一个用户命名的文件夹。最终用途是 4K 视频里的插图，所以走高质量 JPEG
+/// (≈ 8K 长边、quality 0.92) —— PNG 在 8K 照片内容上会膨胀到 ~100 MB；
+/// JPEG 同分辨率 8-15 MB 且肉眼无差。
+/// - `comparison.jpg`：用户当下看到的画面（带 zoom、⌘+拖动的位移）
+/// - `original_comparison.jpg`：两张图未经任何调整，平摆左右（zoom=1，无位移）
 enum ABComparisonSaver {
     nonisolated static func save(
         name rawName: String,
@@ -40,20 +42,20 @@ enum ABComparisonSaver {
         copyClip(clipB, prefix: "B", into: outDir, fm: fm, copied: &copied, errors: &errors)
 
         if let cg = comparisonImage {
-            let pngURL = outDir.appendingPathComponent("comparison.png")
-            if writePNG(cg, to: pngURL) {
+            let url = outDir.appendingPathComponent("comparison.jpg")
+            if writeJPEG(cg, to: url, quality: 0.98) {
                 wroteImage = true
             } else {
-                errors.append("comparison.png 写盘失败")
+                errors.append("comparison.jpg 写盘失败")
             }
         }
 
         if let cg = originalComparisonImage {
-            let pngURL = outDir.appendingPathComponent("original_comparison.png")
-            if writePNG(cg, to: pngURL) {
+            let url = outDir.appendingPathComponent("original_comparison.jpg")
+            if writeJPEG(cg, to: url, quality: 0.98) {
                 wroteOriginal = true
             } else {
-                errors.append("original_comparison.png 写盘失败")
+                errors.append("original_comparison.jpg 写盘失败")
             }
         }
 
@@ -98,14 +100,17 @@ enum ABComparisonSaver {
         }
     }
 
-    nonisolated private static func writePNG(_ image: CGImage, to url: URL) -> Bool {
+    nonisolated private static func writeJPEG(_ image: CGImage, to url: URL, quality: CGFloat) -> Bool {
         guard let dest = CGImageDestinationCreateWithURL(
             url as CFURL,
-            UTType.png.identifier as CFString,
+            UTType.jpeg.identifier as CFString,
             1,
             nil
         ) else { return false }
-        CGImageDestinationAddImage(dest, image, nil)
+        let opts: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: quality
+        ]
+        CGImageDestinationAddImage(dest, image, opts as CFDictionary)
         return CGImageDestinationFinalize(dest)
     }
 

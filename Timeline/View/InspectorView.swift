@@ -191,6 +191,7 @@ private struct SingleClipDetailView: View {
                     Image(systemName: isFavorite ? "heart.fill" : "heart")
                         .font(.title3)
                         .foregroundStyle(isFavorite ? .red : .secondary)
+                        .symbolEffect(.bounce, value: isFavorite)
                 }
                 .buttonStyle(.borderless)
                 .help(isFavorite ? "取消红心收藏 (F)" : "加红心收藏 (F)")
@@ -365,9 +366,11 @@ private struct TrackInspectorRow: View {
         VStack(alignment: .leading, spacing: 8) {
             TextField("显示名称", text: Binding(
                 get: { config.displayName },
-                set: {
+                set: { newValue in
                     var c = config
-                    c.displayName = $0
+                    c.displayName = newValue
+                    // 用户手改过名字之后，自动 EXIF 命名不再覆盖
+                    c.userRenamedDisplayName = true
                     document.setConfig(c, for: track)
                 }
             ))

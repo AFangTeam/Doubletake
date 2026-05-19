@@ -28,31 +28,9 @@ struct CompareDocumentView: View {
     @State private var exportResult: FavoritesExportResult?
     @State private var exportError: String?
 
-    // AB 对比的保存：用户先点 "保存对比" → 在 ABCompareView 里填名字 + 拿到截图 →
-    // 我们再起 fileImporter 让用户选父文件夹 → 写盘。
-    @State private var pendingABSave: PendingABSave?
-    @State private var abSaveFolderImporter: Bool = false
+    // AB 对比的保存：现在走 NSSavePanel 一步到位 —— 不需要 pendingABSave / fileImporter
     @State private var abSaveResult: ABComparisonResult?
     @State private var abSaveError: String?
-
-    private struct PendingABSave: Equatable {
-        let name: String
-        let clipAID: ClipID
-        let clipBID: ClipID
-        let comparisonImage: CGImageBox
-        let originalComparisonImage: CGImageBox
-        let info: ABComparisonInfo
-
-        static func == (lhs: Self, rhs: Self) -> Bool {
-            lhs.name == rhs.name && lhs.clipAID == rhs.clipAID && lhs.clipBID == rhs.clipBID
-        }
-    }
-
-    /// CGImage 不是 Equatable —— 包一层让 PendingABSave 能合成 Equatable
-    private final class CGImageBox: @unchecked Sendable {
-        let image: CGImage?
-        init(_ image: CGImage?) { self.image = image }
-    }
 
     private var favoriteCount: Int { vm.favoriteCount(in: document) }
 
@@ -88,10 +66,12 @@ struct CompareDocumentView: View {
                 }
             }
             .task(id: document.bookmarkA) {
-                await vm.applyBookmark(document.bookmarkA, for: .a)
+                let first = await vm.applyBookmark(document.bookmarkA, for: .a)
+                applyAutoTrackName(from: first, to: .a)
             }
             .task(id: document.bookmarkB) {
-                await vm.applyBookmark(document.bookmarkB, for: .b)
+                let first = await vm.applyBookmark(document.bookmarkB, for: .b)
+                applyAutoTrackName(from: first, to: .b)
             }
             .onAppear {
                 previewCtrl.onClose = { preview = nil }
@@ -124,13 +104,6 @@ struct CompareDocumentView: View {
                 allowsMultipleSelection: false
             ) { result in
                 handleExportFolder(result)
-            }
-            .fileImporter(
-                isPresented: $abSaveFolderImporter,
-                allowedContentTypes: [.folder],
-                allowsMultipleSelection: false
-            ) { result in
-                handleABSaveFolder(result)
             }
             .modifier(AlertsModifier(
                 exportResult: $exportResult,
@@ -222,6 +195,25 @@ struct CompareDocumentView: View {
             abSaveError = "原始素材已不存在，无法跳转到这次对比。"
             return
         }
+    }
+
+    /// 第一次扫描完文件夹时，用第一张 clip 的 EXIF（镜头 / 机身）建议 track 名字。
+    /// 用户没手改过 displayName 时才覆盖；改过的不动。
+    @MainActor
+    private func applyAutoTrackName(from clip: MediaClip?, to track: Track) {
+        guard let clip else { return }
+        var config = document.config(for: track)
+        guard !config.userRenamedDisplayName, config.hasDefaultDisplayName else { return }
+        guard let suggestion = autoTrackName(from: clip.metadata) else { return }
+        config.displayName = suggestion
+        document.setConfig(config, for: track)
+    }
+
+    private func autoTrackName(from m: ExifMetadata) -> String? {
+        // 镜头优先（更能区分对比组合），其次机身
+        let candidate = m.lensModel ?? m.cameraModel
+        guard let raw = candidate, !raw.isEmpty else { return nil }
+        return String(raw.prefix(40))
     }
 
     /// 给保存的对比一行紧凑摘要，列表项里附带显示
@@ -346,16 +338,18 @@ struct CompareDocumentView: View {
                         vm.selectionAnchor = nextA.id
                         vm.requestedScrollClipID = nextA.id
                     },
-                    onSaveComparison: { name, image, originalImage, info in
-                        pendingABSave = PendingABSave(
+                    onSaveComparison: { name, parentFolder, image, originalImage, info in
+                        // NSSavePanel 已经返回了"父文件夹 + 名字"完整路径，直接写盘 ——
+                        // 不再走 fileImporter chain
+                        handleABSaveDirect(
                             name: name,
+                            parentFolder: parentFolder,
                             clipAID: aID,
                             clipBID: bID,
-                            comparisonImage: CGImageBox(image),
-                            originalComparisonImage: CGImageBox(originalImage),
+                            comparisonImage: image,
+                            originalComparisonImage: originalImage,
                             info: info
                         )
-                        abSaveFolderImporter = true
                     },
                     onToggleFullScreen: { previewCtrl.toggleFullScreen() },
                     onToggleFloating: { previewFloating.toggle() }
@@ -437,49 +431,51 @@ struct CompareDocumentView: View {
         }
     }
 
-    private func handleABSaveFolder(_ result: Result<[URL], Error>) {
-        defer { pendingABSave = nil }
-        guard let pending = pendingABSave else { return }
-        switch result {
-        case .success(let urls):
-            guard let folder = urls.first else { return }
-            guard let clipA = vm.clip(for: pending.clipAID),
-                  let clipB = vm.clip(for: pending.clipBID) else {
-                abSaveError = "选中的 AB 素材已不存在"
-                return
-            }
-            let started = folder.startAccessingSecurityScopedResource()
-            defer { if started { folder.stopAccessingSecurityScopedResource() } }
+    /// 从 NSSavePanel 拿到 name + parentFolder 直接写盘。
+    /// 不需要 fileImporter（已经被 NSSavePanel 替代）。
+    private func handleABSaveDirect(
+        name: String,
+        parentFolder: URL,
+        clipAID: ClipID,
+        clipBID: ClipID,
+        comparisonImage: CGImage?,
+        originalComparisonImage: CGImage?,
+        info: ABComparisonInfo
+    ) {
+        guard let clipA = vm.clip(for: clipAID),
+              let clipB = vm.clip(for: clipBID) else {
+            abSaveError = "选中的 AB 素材已不存在"
+            return
+        }
+        let started = parentFolder.startAccessingSecurityScopedResource()
+        defer { if started { parentFolder.stopAccessingSecurityScopedResource() } }
 
-            let infoData: Data? = {
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                return try? encoder.encode(pending.info)
-            }()
+        let infoData: Data? = {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            return try? encoder.encode(info)
+        }()
 
-            do {
-                let res = try ABComparisonSaver.save(
-                    name: pending.name,
-                    parentFolder: folder,
-                    clipA: clipA,
-                    clipB: clipB,
-                    comparisonImage: pending.comparisonImage.image,
-                    originalComparisonImage: pending.originalComparisonImage.image,
-                    infoJSON: infoData
-                )
-                abSaveResult = res
-                let entry = SavedComparison(
-                    name: pending.name,
-                    clipAIDSerialized: pending.clipAID.serialized,
-                    clipBIDSerialized: pending.clipBID.serialized,
-                    summaryA: shortSummary(of: clipA),
-                    summaryB: shortSummary(of: clipB)
-                )
-                document.payload.savedComparisons.append(entry)
-            } catch {
-                abSaveError = error.localizedDescription
-            }
-        case .failure(let error):
+        do {
+            let res = try ABComparisonSaver.save(
+                name: name,
+                parentFolder: parentFolder,
+                clipA: clipA,
+                clipB: clipB,
+                comparisonImage: comparisonImage,
+                originalComparisonImage: originalComparisonImage,
+                infoJSON: infoData
+            )
+            abSaveResult = res
+            let entry = SavedComparison(
+                name: name,
+                clipAIDSerialized: clipAID.serialized,
+                clipBIDSerialized: clipBID.serialized,
+                summaryA: shortSummary(of: clipA),
+                summaryB: shortSummary(of: clipB)
+            )
+            document.payload.savedComparisons.append(entry)
+        } catch {
             abSaveError = error.localizedDescription
         }
     }

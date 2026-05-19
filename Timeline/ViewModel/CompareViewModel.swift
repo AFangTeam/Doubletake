@@ -25,6 +25,19 @@ final class CompareViewModel {
     /// pendingScrollDate 是按"日期"跳，这个是按"具体 clip"跳，两个通道互不冲突。
     var requestedScrollClipID: ClipID?
 
+    /// 把一组 clip 的几何中点对准视口中心。点对比列表跳转用这个 ——
+    /// 不能简单地用日期中点 + pendingScrollDate：折叠空白模式下日期中点
+    /// 可能落在压缩缝里，会吸附到 segment 边界。直接在 TimelineView 算 x 中点。
+    struct CenterClipsRequest: Equatable, Sendable {
+        let token: UUID
+        let clipIDs: [ClipID]
+        init(_ clipIDs: [ClipID]) {
+            self.token = UUID()
+            self.clipIDs = clipIDs
+        }
+    }
+    var pendingCenterClips: CenterClipsRequest?
+
     /// 顶层（CompareDocumentView）发起的 timeline 操作请求 —— 例如
     /// ⌘= 缩放、⌘0 适配、⌘← 跳到开头等。
     /// TimelineView 用 `.onChange(of: vm.pendingTimelineAction)` 监听并执行。
@@ -101,20 +114,21 @@ final class CompareViewModel {
         }
     }
 
-    /// 跳到一次保存过的 AB 对比：选中两张图、把 timeline 滚到中点日期。
+    /// 跳到一次保存过的 AB 对比：选中两张图，并让两张的几何中点对准视口中心。
     /// 返回 (a, b) 让调用方接着进 AB 预览；返回 nil 表示原始 clip 已经不存在。
     func jumpToComparison(_ c: SavedComparison, in document: CompareDocument) -> (a: ClipID, b: ClipID)? {
         guard let aID = ClipID(serialized: c.clipAIDSerialized),
               let bID = ClipID(serialized: c.clipBIDSerialized),
-              let ca = clip(for: aID),
-              let cb = clip(for: bID)
+              clip(for: aID) != nil,
+              clip(for: bID) != nil
         else { return nil }
 
         selection = [aID, bID]
         selectionAnchor = aID
-        let mid = Date(timeIntervalSince1970:
-            (ca.captureDate.timeIntervalSince1970 + cb.captureDate.timeIntervalSince1970) / 2)
-        pendingScrollDate = mid
+        // 不用 pendingScrollDate —— 折叠模式下日期中点可能落在压缩缝里，
+        // 被吸附到 segment 起点导致只有较早那张在视口中心。
+        // 改成 TimelineView 直接按 x 算两张图的几何中点。
+        pendingCenterClips = CenterClipsRequest([aID, bID])
         return (aID, bID)
     }
 
@@ -264,7 +278,10 @@ final class CompareViewModel {
 
     /// Resolve bookmark (if any), start security scope, scan folder, publish results.
     /// 调用方应在 bookmark 变更或视图首次出现时调用。
-    func applyBookmark(_ data: Data?, for track: Track) async {
+    /// 返回扫描到的第一张 clip —— 供调用方做"自动 EXIF 命名 track"等后处理；
+    /// 没扫到 / bookmark 为空时返回 nil。
+    @discardableResult
+    func applyBookmark(_ data: Data?, for track: Track) async -> MediaClip? {
         stopScope(for: track)
         // 切换文件夹时把这条轨的旧选区清掉
         selection = selection.filter { $0.track != track }
@@ -274,7 +291,7 @@ final class CompareViewModel {
             updateState({
                 $0 = TrackState()
             }, for: track)
-            return
+            return nil
         }
 
         let resolved: ResolvedFolder
@@ -285,7 +302,7 @@ final class CompareViewModel {
                 $0 = TrackState()
                 $0.error = "无法解析文件夹书签：\(error.localizedDescription)"
             }, for: track)
-            return
+            return nil
         }
 
         guard resolved.url.startAccessingSecurityScopedResource() else {
@@ -293,7 +310,7 @@ final class CompareViewModel {
                 $0 = TrackState()
                 $0.error = "未授权访问该文件夹，请重新选择"
             }, for: track)
-            return
+            return nil
         }
         setActiveScope(resolved.url, for: track)
 
@@ -320,12 +337,14 @@ final class CompareViewModel {
                 $0.isScanning = false
                 $0.folderURL = scan.folderURL
             }, for: track)
+            return scan.clips.first
         case .failure(let error):
             updateState({
                 $0.clips = []
                 $0.isScanning = false
                 $0.error = error.localizedDescription
             }, for: track)
+            return nil
         }
     }
 

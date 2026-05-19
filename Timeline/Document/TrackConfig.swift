@@ -16,13 +16,45 @@ nonisolated struct TrackConfig: Codable, Hashable, Sendable {
     var displayName: String
     var timeOffsetSeconds: Double
     var folderBookmarkRelativePath: String?
+    /// 用户是否手动改过 displayName（true → 自动 EXIF 命名不再覆盖）
+    var userRenamedDisplayName: Bool
 
     static func empty(track: Track) -> TrackConfig {
         TrackConfig(
             displayName: "机型 \(track.displayLabel)",
             timeOffsetSeconds: 0,
-            folderBookmarkRelativePath: nil
+            folderBookmarkRelativePath: nil,
+            userRenamedDisplayName: false
         )
+    }
+
+    /// 是否仍是默认值（"机型 A" / "机型 B"），用于判定能不能自动 EXIF 命名
+    var hasDefaultDisplayName: Bool {
+        displayName == "机型 A" || displayName == "机型 B"
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case displayName, timeOffsetSeconds, folderBookmarkRelativePath, userRenamedDisplayName
+    }
+
+    init(
+        displayName: String,
+        timeOffsetSeconds: Double,
+        folderBookmarkRelativePath: String?,
+        userRenamedDisplayName: Bool = false
+    ) {
+        self.displayName = displayName
+        self.timeOffsetSeconds = timeOffsetSeconds
+        self.folderBookmarkRelativePath = folderBookmarkRelativePath
+        self.userRenamedDisplayName = userRenamedDisplayName
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.displayName = try c.decode(String.self, forKey: .displayName)
+        self.timeOffsetSeconds = try c.decode(Double.self, forKey: .timeOffsetSeconds)
+        self.folderBookmarkRelativePath = try c.decodeIfPresent(String.self, forKey: .folderBookmarkRelativePath)
+        self.userRenamedDisplayName = try c.decodeIfPresent(Bool.self, forKey: .userRenamedDisplayName) ?? false
     }
 }
 

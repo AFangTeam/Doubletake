@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct TrackHeaderView: View {
     let track: Track
@@ -12,8 +13,11 @@ struct TrackHeaderView: View {
     var onFocus: () -> Void
     var onOffsetDelta: (TimeInterval) -> Void
     var onOffsetReset: () -> Void
+    /// 从 Finder 拖一个文件夹到本轨道时调用
+    var onDropFolder: (URL) -> Void = { _ in }
 
     @State private var dragLastTranslation: CGFloat = 0
+    @State private var isDropTargeted: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -52,6 +56,20 @@ struct TrackHeaderView: View {
                     .padding(4)
             }
         }
+        // 拖文件夹进来时高亮反馈
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(tint, lineWidth: 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(tint.opacity(0.18))
+                    )
+                    .padding(4)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: isDropTargeted)
         .contentShape(Rectangle())
         .onTapGesture {
             onFocus()
@@ -77,7 +95,21 @@ struct TrackHeaderView: View {
                     dragLastTranslation = 0
                 }
         )
-        .help("点击聚焦本轨；横向拖动整体移动；右键可重置")
+        .help("点击聚焦本轨；横向拖动整体移动；从 Finder 拖文件夹来直接换源；右键可重置偏移")
+        // Finder 拖文件夹到 track header → 等价于点 inspector 选择文件夹
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            guard let provider = providers.first else { return false }
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                var isDir: ObjCBool = false
+                let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+                guard exists, isDir.boolValue else { return }
+                DispatchQueue.main.async {
+                    onDropFolder(url)
+                }
+            }
+            return true
+        }
     }
 
     private func formatOffset(_ s: TimeInterval) -> String {

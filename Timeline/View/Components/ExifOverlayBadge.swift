@@ -3,61 +3,22 @@ import SwiftUI
 /// 浮在预览图左上角的半透明 EXIF 信息卡。
 /// AB 对比时显示在每张图各自的左上角，方便一眼看清差异。
 /// 字段由 `PreviewOverlaySettings` 控制开关。
-/// `scale` 用于在 ImageRenderer 高分输出（7680px PNG）下整体放大字号 / 圆角 / 阴影。
+///
+/// `scale`：在 ImageRenderer 高分输出（7680px PNG）下整体放大字号 / 圆角 / 阴影。
+/// `diffWith`：另一侧 clip 的 metadata。**不为 nil 时**，每个 EXIF 字段会
+/// 跟另一侧逐项比较，不同的字段染黄色 + 微 glow，一致的保持白色。AB 实时预览
+/// 和保存的对比图都用这个，让"哪些参数不同"一秒锁定。
 struct ExifOverlayBadge: View {
     let clip: MediaClip
     let settings: PreviewOverlaySettings
-    /// AB 对比时显示侧别角标（"A" / "B"），单图预览传 nil。
     var sideLabel: String? = nil
-    /// 角标底色（A 蓝、B 橙）
     var sideTint: Color = .accentColor
-    /// 整体视觉缩放倍数：屏幕上传 1.0，截图 PNG 里传 2.5 让字号、圆角、阴影一起放大。
     var scale: CGFloat = 1.0
-
-    private var lines: [LineSpec] {
-        var out: [LineSpec] = []
-        // 顶部第一行：相机+镜头摘要（合并显示，最显眼）
-        if settings.showCamera || settings.showLens {
-            var seg: [String] = []
-            if settings.showCamera, let cam = clip.metadata.cameraModel { seg.append(cam) }
-            if settings.showLens, let lens = clip.metadata.lensModel { seg.append(lens) }
-            if !seg.isEmpty {
-                out.append(.init(text: seg.joined(separator: " · "), kind: .secondary))
-            }
-        }
-
-        // 主参数（焦段 · 光圈 · 快门 · ISO）合并成一行 monospaced，最常对比
-        var primary: [String] = []
-        if settings.showFocalLength, let f = clip.metadata.focalLengthDisplay {
-            primary.append(f)
-        }
-        if settings.showAperture, let a = clip.metadata.apertureDisplay {
-            primary.append(a)
-        }
-        if settings.showShutter, let s = clip.metadata.shutterDisplay {
-            primary.append(s)
-        }
-        if settings.showISO, let iso = clip.metadata.isoDisplay {
-            primary.append(iso)
-        }
-        if !primary.isEmpty {
-            out.append(.init(text: primary.joined(separator: "  ·  "), kind: .primary))
-        }
-
-        if settings.showCaptureDate {
-            out.append(.init(
-                text: clip.captureDate.formatted(date: .abbreviated, time: .standard),
-                kind: .secondary
-            ))
-        }
-        if settings.showFilename {
-            out.append(.init(text: clip.displayName, kind: .secondary))
-        }
-        return out
-    }
+    /// 另一侧 metadata；nil = 不做 diff
+    var diffWith: ExifMetadata? = nil
 
     var body: some View {
-        if !settings.enabled || lines.isEmpty {
+        if !settings.enabled || isEmpty {
             EmptyView()
         } else {
             HStack(alignment: .top, spacing: 8 * scale) {
@@ -73,9 +34,22 @@ struct ExifOverlayBadge: View {
                 }
 
                 VStack(alignment: .leading, spacing: 3 * scale) {
-                    ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                        Text(line.text)
-                            .font(line.kind.font(scale: scale))
+                    if let chunks = topLineChunks() {
+                        chunkLine(chunks, kind: .secondary)
+                    }
+                    if let chunks = primaryChunks() {
+                        chunkLine(chunks, kind: .primary)
+                    }
+                    if settings.showCaptureDate {
+                        Text(clip.captureDate.formatted(date: .abbreviated, time: .standard))
+                            .font(LineKind.secondary.font(scale: scale))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    if settings.showFilename {
+                        Text(clip.displayName)
+                            .font(LineKind.secondary.font(scale: scale))
                             .foregroundStyle(.white)
                             .lineLimit(1)
                             .truncationMode(.tail)
@@ -106,20 +80,94 @@ struct ExifOverlayBadge: View {
         }
     }
 
-    private struct LineSpec {
-        var text: String
-        var kind: Kind
+    // MARK: - 行渲染
 
-        enum Kind {
-            case primary, secondary
-
-            func font(scale: CGFloat) -> Font {
-                switch self {
-                case .primary:
-                    return .system(size: 12.5 * scale, weight: .semibold, design: .monospaced)
-                case .secondary:
-                    return .system(size: 11 * scale, weight: .regular, design: .default)
+    @ViewBuilder
+    private func chunkLine(_ chunks: [Chunk], kind: LineKind) -> some View {
+        HStack(spacing: 0) {
+            ForEach(Array(chunks.enumerated()), id: \.offset) { idx, chunk in
+                if idx > 0 {
+                    Text("  ·  ")
+                        .foregroundStyle(.white.opacity(0.55))
                 }
+                Text(chunk.text)
+                    .foregroundStyle(chunk.highlighted ? Color.yellow : .white)
+                    .shadow(
+                        color: chunk.highlighted ? .yellow.opacity(0.6) : .clear,
+                        radius: 3 * scale
+                    )
+            }
+        }
+        .font(kind.font(scale: scale))
+        .lineLimit(1)
+        .truncationMode(.tail)
+    }
+
+    // MARK: - 分块构造
+
+    private var isEmpty: Bool {
+        topLineChunks() == nil
+            && primaryChunks() == nil
+            && !settings.showCaptureDate
+            && !settings.showFilename
+    }
+
+    private func topLineChunks() -> [Chunk]? {
+        guard settings.showCamera || settings.showLens else { return nil }
+        var out: [Chunk] = []
+        if settings.showCamera, let cam = clip.metadata.cameraModel {
+            let other = diffWith?.cameraModel
+            out.append(Chunk(text: cam, highlighted: diffSet(cam, other)))
+        }
+        if settings.showLens, let lens = clip.metadata.lensModel {
+            let other = diffWith?.lensModel
+            out.append(Chunk(text: lens, highlighted: diffSet(lens, other)))
+        }
+        return out.isEmpty ? nil : out
+    }
+
+    private func primaryChunks() -> [Chunk]? {
+        var out: [Chunk] = []
+        if settings.showFocalLength, let v = clip.metadata.focalLengthDisplay {
+            out.append(Chunk(text: v, highlighted: diffSet(v, diffWith?.focalLengthDisplay)))
+        }
+        if settings.showAperture, let v = clip.metadata.apertureDisplay {
+            out.append(Chunk(text: v, highlighted: diffSet(v, diffWith?.apertureDisplay)))
+        }
+        if settings.showShutter, let v = clip.metadata.shutterDisplay {
+            out.append(Chunk(text: v, highlighted: diffSet(v, diffWith?.shutterDisplay)))
+        }
+        if settings.showISO, let v = clip.metadata.isoDisplay {
+            out.append(Chunk(text: v, highlighted: diffSet(v, diffWith?.isoDisplay)))
+        }
+        return out.isEmpty ? nil : out
+    }
+
+    /// 是否要把这个 chunk 高亮为"差异"。
+    /// - 没启用 diff（diffWith == nil）→ 永远 false
+    /// - 另一侧没有该字段 → 不算差异（只一侧拍到的元数据不能算"不同"）
+    /// - 都有但不相等 → 算差异
+    private func diffSet(_ mine: String?, _ other: String?) -> Bool {
+        guard diffWith != nil else { return false }
+        guard let mine, let other else { return false }
+        return mine != other
+    }
+
+    // MARK: - 类型
+
+    private struct Chunk {
+        let text: String
+        let highlighted: Bool
+    }
+
+    private enum LineKind {
+        case primary, secondary
+        func font(scale: CGFloat) -> Font {
+            switch self {
+            case .primary:
+                return .system(size: 12.5 * scale, weight: .semibold, design: .monospaced)
+            case .secondary:
+                return .system(size: 11 * scale, weight: .regular, design: .default)
             }
         }
     }

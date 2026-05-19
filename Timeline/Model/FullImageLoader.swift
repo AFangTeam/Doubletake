@@ -58,6 +58,28 @@ actor FullImageLoader {
         cache.removeAll(keepingCapacity: false)
     }
 
+    /// 解码到原图**完整**分辨率，**并应用 EXIF 方向标签**。
+    /// 仅用于"保存对比"等一次性高质量出图。
+    ///
+    /// 走 thumbnail API（而不是 `CGImageSourceCreateImageAtIndex`），因为只有
+    /// thumbnail 这一路支持 `kCGImageSourceCreateThumbnailWithTransform`。
+    /// 竖拍照片在文件里其实是横向像素 + EXIF Orientation = 6/8，没这个标志会被
+    /// 当横图画出来。
+    /// maxPixel 设到 32768 —— 实际上等于"无 cap"，现实里没相机突破这个数。
+    func fullResolutionImage(for url: URL) async -> CGImage? {
+        let result = await Task<CGImage?, Never>.detached(priority: .userInitiated) {
+            guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+            let opts: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: 32768
+            ]
+            return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
+        }.value
+        return result
+    }
+
     private static func decode(url: URL, maxPixel: Int) -> CGImage? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         let opts: [CFString: Any] = [

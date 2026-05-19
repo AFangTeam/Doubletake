@@ -111,7 +111,8 @@ struct ClipThumbnailView: View {
         }
         .scaleEffect(isSelected ? 1.06 : 1.0)
         .shadow(color: isSelected ? tint.opacity(0.35) : .clear, radius: 4)
-        .animation(.easeOut(duration: 0.12), value: isSelected)
+        // 选中时一次轻弹：自然回弹比 easeOut 更"对生命"
+        .animation(.spring(response: 0.32, dampingFraction: 0.65), value: isSelected)
     }
 
     private func loadThumbnail() async {

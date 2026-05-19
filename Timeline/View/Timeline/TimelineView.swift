@@ -7,12 +7,10 @@ struct TimelineView: View {
     let vm: CompareViewModel
     var onRequestPreview: () -> Void = {}
 
-    /// AppKit scroll-wheel monitor token，用于 ⌘+滚轮 缩放
-    @State private var scrollWheelMonitor: Any?
-    /// timeline rightPane 在窗口坐标系里的 frame，用于把鼠标点定位到 content x
+    /// timeline rightPane 在窗口坐标系里的 frame —— 用于把 NSEvent.mouseLocation
+    /// （屏幕坐标）反算到 timeline 内的 viewport 坐标，供 ⌘+/⌘-/捏合 锚点用
     @State private var rightPaneFrameInWindow: CGRect = .zero
-    /// 文档窗口本身的引用 —— global event monitor 会收到任意窗口的 scroll/magnify，
-    /// 不过滤就会把预览窗的事件错算到 timeline 的坐标里
+    /// 当前窗口的引用 —— 把 NSEvent.mouseLocation 从屏幕坐标转到窗口坐标用
     @State private var hostWindow: NSWindow?
 
     private let rulerHeight: Double = 32
@@ -114,8 +112,11 @@ struct TimelineView: View {
                     scrollClipIntoCenter(clip, geometry: geometry)
                     vm.requestedScrollClipID = nil
                 }
-                .onAppear { installScrollWheelMonitor(geometryProvider: { makeGeometry() }) }
-                .onDisappear { removeScrollWheelMonitor() }
+                .onChange(of: vm.pendingCenterClips) { _, req in
+                    guard let req else { return }
+                    centerClips(req.clipIDs, geometry: geometry)
+                    vm.pendingCenterClips = nil
+                }
         } else {
             ContentUnavailableView {
                 Label("尚无可显示的素材", systemImage: "calendar.badge.exclamationmark")
@@ -140,7 +141,8 @@ struct TimelineView: View {
                     pxPerSecond: pxPerSecond,
                     onFocus: { focusedTrack = .a },
                     onOffsetDelta: { delta in mutateOffset(track: .a) { $0 += delta } },
-                    onOffsetReset: { mutateOffset(track: .a) { $0 = 0 } }
+                    onOffsetReset: { mutateOffset(track: .a) { $0 = 0 } },
+                    onDropFolder: { url in setFolderViaBookmark(url, for: .a) }
                 )
                 .frame(height: trackHeight)
                 Divider()
@@ -154,7 +156,8 @@ struct TimelineView: View {
                     pxPerSecond: pxPerSecond,
                     onFocus: { focusedTrack = .b },
                     onOffsetDelta: { delta in mutateOffset(track: .b) { $0 += delta } },
-                    onOffsetReset: { mutateOffset(track: .b) { $0 = 0 } }
+                    onOffsetReset: { mutateOffset(track: .b) { $0 = 0 } },
+                    onDropFolder: { url in setFolderViaBookmark(url, for: .b) }
                 )
                 .frame(height: trackHeight)
             }
@@ -205,9 +208,9 @@ struct TimelineView: View {
                     )
                 }
                 .contentShape(Rectangle())
-                // 注意：捏合缩放走 NSEvent .magnify monitor（在 installScrollWheelMonitor 里），
-                // 因为 SwiftUI MagnifyGesture 的 startLocation 在 macOS trackpad 上不可靠 ——
-                // 经常报错误位置导致缩放飞到末端
+                // SwiftUI MagnifyGesture：用 NSEvent.mouseLocation 起手时一次性查鼠标位置算锚点，
+                // 不再装事件 monitor（之前的 NSEvent.addLocalMonitorForEvents 触发 XProtect Yara）
+                .gesture(timelineMagnifyGesture(geometry: geometry))
                 .gesture(marqueeGesture(geometry: geometry))
 
                 if let m = marquee {
@@ -216,8 +219,14 @@ struct TimelineView: View {
                         .fill(Color.accentColor.opacity(0.12))
                         .frame(width: rect.width, height: rect.height)
                         .overlay(
+                            // 边框做轻微脉动，活但不喧宾夺主
                             Rectangle()
                                 .strokeBorder(Color.accentColor, lineWidth: 1)
+                                .phaseAnimator([0.65, 1.0]) { content, value in
+                                    content.opacity(value)
+                                } animation: { _ in
+                                    .easeInOut(duration: 0.9)
+                                }
                         )
                         .position(x: rect.midX, y: rect.midY)
                         .allowsHitTesting(false)
@@ -408,6 +417,19 @@ struct TimelineView: View {
 
     // MARK: - 偏移
 
+    /// 从 Finder 拖到 track header 的文件夹：建 bookmark + 写文档，
+    /// 等价于点 Inspector 的"选择文件夹"
+    private func setFolderViaBookmark(_ url: URL, for track: Track) {
+        let didStart = url.startAccessingSecurityScopedResource()
+        defer { if didStart { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let bookmark = try BookmarkStore.makeBookmark(for: url)
+            document.setBookmark(bookmark, for: track)
+        } catch {
+            // 失败静默 —— track header 高亮已退场，用户可以手动从 inspector 重选
+        }
+    }
+
     private func mutateOffset(track: Track, _ body: (inout TimeInterval) -> Void) {
         var c = document.config(for: track)
         body(&c.timeOffsetSeconds)
@@ -593,6 +615,20 @@ struct TimelineView: View {
         animatedScrollTo(target)
     }
 
+    /// 把一组 clip 的几何中点对准视口中心。对比列表跳转用 ——
+    /// 在 x 坐标里直接平均，绕开"日期中点落在压缩缝里被吸附"的问题
+    private func centerClips(_ ids: [ClipID], geometry: TimelineGeometry) {
+        let xs: [Double] = ids.compactMap { id in
+            guard let clip = vm.clip(for: id) else { return nil }
+            let offset = document.config(for: clip.track).timeOffsetSeconds
+            return geometry.x(at: clip.captureDate.addingTimeInterval(offset))
+        }
+        guard !xs.isEmpty else { return }
+        let midX = xs.reduce(0, +) / Double(xs.count)
+        let target = max(0, midX - max(viewportWidth, 1) / 2)
+        animatedScrollTo(target)
+    }
+
     private func scrollTo(x: Double) {
         scrollPosition.scrollTo(x: x)
     }
@@ -643,65 +679,33 @@ struct TimelineView: View {
         didApplyInitialViewState = true
     }
 
-    // MARK: - ⌘+滚轮 缩放（鼠标位置锚点）
+    // MARK: - 捏合缩放（鼠标位置锚点）
 
-    /// 注册一个 local NSEvent monitor 拦截 `scrollWheel` + `magnify` 事件，
-    /// 用统一的"鼠标位置为锚点"逻辑去做 timeline 缩放。
-    ///
-    /// 为什么不用 SwiftUI 的 MagnifyGesture：macOS trackpad 触发 pinch 时，
-    /// SwiftUI 拿不到准确的 cursor 位置，`MagnifyGesture.startLocation` 经常是 0
-    /// 或上一帧的旧值，结果就是"双指放大时间轴直接飞到末端"。
-    /// NSEvent 的 `locationInWindow` 始终是真实鼠标坐标，所以走 AppKit。
-    private func installScrollWheelMonitor(geometryProvider: @escaping () -> TimelineGeometry?) {
-        if scrollWheelMonitor != nil { return }
-        scrollWheelMonitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .magnify]) { [self] event in
-            // 只处理本视图所在文档窗口的事件；预览窗里的滚动 / 捏合不要错算到 timeline 坐标里
-            guard let window = event.window,
-                  let host = hostWindow,
-                  window === host
-            else { return event }
-
-            // 把鼠标点转到 timeline rightPane 内的坐标系
-            let contentHeight = window.contentView?.bounds.height ?? 0
-            let mouseX = event.locationInWindow.x
-            let mouseY = contentHeight - event.locationInWindow.y  // AppKit Y 向上、SwiftUI .global Y 向下
-            let frame = rightPaneFrameInWindow
-            guard frame.contains(CGPoint(x: mouseX, y: mouseY)) else { return event }
-
-            // 决定缩放因子：⌘+滚轮 / 触控板捏合 各自一套公式
-            let factor: Double
-            switch event.type {
-            case .scrollWheel:
-                guard event.modifierFlags.contains(.command) else { return event }
-                factor = exp(event.scrollingDeltaY * 0.02)
-            case .magnify:
-                // event.magnification 是这一帧的增量缩放（约 -0.05 ~ 0.05），可直接当成 (1+delta)
-                factor = 1.0 + event.magnification
-            default:
-                return event
+    /// SwiftUI MagnifyGesture 的 startLocation 在 macOS trackpad 上常常不准。
+    /// 修复办法：起手时一次性查 `NSEvent.mouseLocation`（屏幕坐标）算锚点。
+    /// 这是单点查询、不是事件 monitor，**不触发** XProtect 的事件 hook 规则。
+    private func timelineMagnifyGesture(geometry: TimelineGeometry) -> some Gesture {
+        MagnifyGesture(minimumScaleDelta: 0.005)
+            .onChanged { value in
+                if pinchBaseline == nil,
+                   let anchorVpX = mouseViewportXIfInsideTimeline() {
+                    let contentX = scrollX + anchorVpX
+                    pinchBaseline = PinchBaseline(
+                        pxPerSecond: pxPerSecond,
+                        anchorDate: geometry.date(at: contentX),
+                        anchorViewportX: anchorVpX
+                    )
+                }
+                guard let baseline = pinchBaseline else { return }
+                let target = clamp(baseline.pxPerSecond * value.magnification, minPxPerSecond, maxPxPerSecond)
+                applyZoom(
+                    targetPxPerSecond: target,
+                    anchorDate: baseline.anchorDate,
+                    anchorViewportX: baseline.anchorViewportX,
+                    currentGeometry: geometry
+                )
             }
-
-            guard let geometry = geometryProvider() else { return nil }
-
-            let mouseInViewportX = mouseX - frame.minX
-            let contentX = mouseInViewportX + scrollX
-            let anchorDate = geometry.date(at: contentX)
-            let target = clamp(pxPerSecond * factor, minPxPerSecond, maxPxPerSecond)
-            applyZoom(
-                targetPxPerSecond: target,
-                anchorDate: anchorDate,
-                anchorViewportX: mouseInViewportX,
-                currentGeometry: geometry
-            )
-            return nil   // 吃掉事件
-        }
-    }
-
-    private func removeScrollWheelMonitor() {
-        if let m = scrollWheelMonitor {
-            NSEvent.removeMonitor(m)
-            scrollWheelMonitor = nil
-        }
+            .onEnded { _ in pinchBaseline = nil }
     }
 }
 

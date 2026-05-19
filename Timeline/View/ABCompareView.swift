@@ -10,9 +10,10 @@ struct ABCompareView: View {
     let isFloating: Bool
     var onDismiss: () -> Void
     var onNavigate: (CompareViewModel.NavDirection) -> Void = { _ in }
-    /// 用户点了"保存对比"并填好名字之后：把名字、当前对比截图、原始（未调整）对比截图、视图参数一起回调出去。
-    /// CompareDocumentView 负责弹 fileImporter 选父文件夹 + 写盘。
-    var onSaveComparison: (String, CGImage?, CGImage?, ABComparisonInfo) -> Void = { _, _, _, _ in }
+    /// 用户在 NSSavePanel 里选好"位置 + 名字"之后：把名字、父文件夹、对比截图、
+    /// 原始（未调整）对比截图、视图参数一起回调出去。CompareDocumentView 写盘。
+    /// 走原生 NSSavePanel 比"命名 popover → 文件夹 picker → alert"三步链顺得多。
+    var onSaveComparison: (String, URL, CGImage?, CGImage?, ABComparisonInfo) -> Void = { _, _, _, _, _ in }
     var onToggleFullScreen: () -> Void = {}
     var onToggleFloating: () -> Void = {}
 
@@ -38,10 +39,6 @@ struct ABCompareView: View {
     @State private var stageSize: CGSize = .zero
     @FocusState private var focused: Bool
 
-    // MARK: - 保存对比 UI
-    @State private var savePopoverPresented: Bool = false
-    @State private var saveNameDraft: String = ""
-
     private enum DragSide { case a, b }
 
     private let minZoom: Double = 0.2
@@ -56,7 +53,7 @@ struct ABCompareView: View {
         isFloating: Bool,
         onDismiss: @escaping () -> Void,
         onNavigate: @escaping (CompareViewModel.NavDirection) -> Void = { _ in },
-        onSaveComparison: @escaping (String, CGImage?, CGImage?, ABComparisonInfo) -> Void = { _, _, _, _ in },
+        onSaveComparison: @escaping (String, URL, CGImage?, CGImage?, ABComparisonInfo) -> Void = { _, _, _, _, _ in },
         onToggleFullScreen: @escaping () -> Void = {},
         onToggleFloating: @escaping () -> Void = {}
     ) {
@@ -103,54 +100,34 @@ struct ABCompareView: View {
         .task(id: clipB.id) {
             await prefetchSources(for: clipB)
         }
-        // popover 输入框打开时让出键盘 —— 否则 Esc / Space / 方向键会被预览视图抢走，
-        // 用户改名字想退到行首/行尾时会被这里劫持。
-        .onKeyPress(.escape) {
-            if savePopoverPresented { return .ignored }
-            onDismiss(); return .handled
-        }
-        .onKeyPress(.space) {
-            if savePopoverPresented { return .ignored }
-            onDismiss(); return .handled
-        }
-        .onKeyPress(.leftArrow) {
-            if savePopoverPresented { return .ignored }
-            onNavigate(.prev); return .handled
-        }
-        .onKeyPress(.rightArrow) {
-            if savePopoverPresented { return .ignored }
-            onNavigate(.next); return .handled
-        }
+        .onKeyPress(.escape) { onDismiss(); return .handled }
+        .onKeyPress(.space) { onDismiss(); return .handled }
+        .onKeyPress(.leftArrow) { onNavigate(.prev); return .handled }
+        .onKeyPress(.rightArrow) { onNavigate(.next); return .handled }
         .background {
-            // 同窗口子视图 + keyboardShortcut，键盘事件路由稳定。
-            // 行业惯例：弹出输入框（popover/dialog）展示时，**无修饰键**的字符快捷键全部禁用，
-            // 否则用户输入 "j" / "0" / "=" / "F" 这些字符会触发预览功能而不是进文本框。
-            // 只保留带 ⌘ 修饰符的快捷键 —— 它们和 macOS 文本框的编辑键不冲突。
+            // 同窗口子视图 + keyboardShortcut，键盘事件路由稳定。NSSavePanel 接管
+            // 文本输入时是独立窗口，不会和这里的字符快捷键打架，安全。
             Group {
-                if !savePopoverPresented {
-                    // —— 无修饰键 / 仅 shift / 仅 ⌃⌘ 的快捷键，弹输入框时全部熄火 ——
-                    Button { switchBothTo(.jpg) } label: { EmptyView() }
-                        .keyboardShortcut("j", modifiers: [])
-                    Button { switchBothTo(.jpg) } label: { EmptyView() }
-                        .keyboardShortcut("J", modifiers: [])
-                    Button { switchBothTo(.raw) } label: { EmptyView() }
-                        .keyboardShortcut("r", modifiers: [])
-                    Button { switchBothTo(.raw) } label: { EmptyView() }
-                        .keyboardShortcut("R", modifiers: [])
-                    Button { zoom = clamp(zoom * 1.25) } label: { EmptyView() }
-                        .keyboardShortcut("=", modifiers: [])
-                    Button { zoom = clamp(zoom * 1.25) } label: { EmptyView() }
-                        .keyboardShortcut("+", modifiers: [])
-                    Button { zoom = clamp(zoom * 0.8) } label: { EmptyView() }
-                        .keyboardShortcut("-", modifiers: [])
-                    Button { resetView() } label: { EmptyView() }
-                        .keyboardShortcut("0", modifiers: [])
-                    Button { onToggleFullScreen() } label: { EmptyView() }
-                        .keyboardShortcut("F", modifiers: .shift)
-                    Button { onToggleFullScreen() } label: { EmptyView() }
-                        .keyboardShortcut("\\", modifiers: [])
-                }
-                // —— 带 ⌘ 的快捷键，文本输入时也保持可用 ——
+                Button { switchBothTo(.jpg) } label: { EmptyView() }
+                    .keyboardShortcut("j", modifiers: [])
+                Button { switchBothTo(.jpg) } label: { EmptyView() }
+                    .keyboardShortcut("J", modifiers: [])
+                Button { switchBothTo(.raw) } label: { EmptyView() }
+                    .keyboardShortcut("r", modifiers: [])
+                Button { switchBothTo(.raw) } label: { EmptyView() }
+                    .keyboardShortcut("R", modifiers: [])
+                Button { zoom = clamp(zoom * 1.25) } label: { EmptyView() }
+                    .keyboardShortcut("=", modifiers: [])
+                Button { zoom = clamp(zoom * 1.25) } label: { EmptyView() }
+                    .keyboardShortcut("+", modifiers: [])
+                Button { zoom = clamp(zoom * 0.8) } label: { EmptyView() }
+                    .keyboardShortcut("-", modifiers: [])
+                Button { resetView() } label: { EmptyView() }
+                    .keyboardShortcut("0", modifiers: [])
+                Button { onToggleFullScreen() } label: { EmptyView() }
+                    .keyboardShortcut("F", modifiers: .shift)
+                Button { onToggleFullScreen() } label: { EmptyView() }
+                    .keyboardShortcut("\\", modifiers: [])
                 Button { zoom = clamp(zoom * 1.25) } label: { EmptyView() }
                     .keyboardShortcut("=", modifiers: .command)
                 Button { zoom = clamp(zoom * 1.25) } label: { EmptyView() }
@@ -161,9 +138,10 @@ struct ABCompareView: View {
                     .keyboardShortcut("0", modifiers: .command)
                 Button { onToggleFullScreen() } label: { EmptyView() }
                     .keyboardShortcut("f", modifiers: [.command, .control])
-                Button { openSavePopover() } label: { EmptyView() }
+                Button { openSavePanel() } label: { EmptyView() }
                     .keyboardShortcut("s", modifiers: .command)
-                    .disabled(savePopoverPresented)
+                Button { onDismiss() } label: { EmptyView() }
+                    .keyboardShortcut("w", modifiers: .command)
             }
             .opacity(0)
             .frame(width: 0, height: 0)
@@ -218,7 +196,7 @@ struct ABCompareView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(.regularMaterial)
+        .background(.ultraThinMaterial)
     }
 
     // MARK: - 图像区
@@ -246,7 +224,8 @@ struct ABCompareView: View {
                         clip: clipA,
                         settings: overlaySettings,
                         sideLabel: "A",
-                        sideTint: .blue
+                        sideTint: .blue,
+                        diffWith: clipB.metadata
                     )
                     .padding(14)
                     .allowsHitTesting(false)
@@ -262,7 +241,8 @@ struct ABCompareView: View {
                         clip: clipB,
                         settings: overlaySettings,
                         sideLabel: "B",
-                        sideTint: .orange
+                        sideTint: .orange,
+                        diffWith: clipA.metadata
                     )
                     .padding(14)
                     .allowsHitTesting(false)
@@ -286,7 +266,8 @@ struct ABCompareView: View {
                     clip: clipA,
                     settings: overlaySettings,
                     sideLabel: "A",
-                    sideTint: .blue
+                    sideTint: .blue,
+                    diffWith: clipB.metadata
                 )
                 .padding(14)
                 .allowsHitTesting(false)
@@ -295,7 +276,8 @@ struct ABCompareView: View {
                     clip: clipB,
                     settings: overlaySettings,
                     sideLabel: "B",
-                    sideTint: .orange
+                    sideTint: .orange,
+                    diffWith: clipA.metadata
                 )
                 .padding(14)
                 .padding(.leading, size.width * curtainSplit)
@@ -449,63 +431,74 @@ struct ABCompareView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
-        .background(.regularMaterial)
+        .background(.ultraThinMaterial)
     }
 
     @ViewBuilder
     private var saveComparisonButton: some View {
         Button {
-            openSavePopover()
+            openSavePanel()
         } label: {
             Label("保存对比", systemImage: "square.and.arrow.down")
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.small)
         .help("把当前 AB 对比导出到一个文件夹：A、B 原文件 + 对比截图（⌘S）")
-        .popover(isPresented: $savePopoverPresented, arrowEdge: .top) {
-            SaveComparisonPopover(
-                name: $saveNameDraft,
-                onCommit: {
-                    let name = saveNameDraft
-                    savePopoverPresented = false
-                    // ImageRenderer 是同步的，跑不动 ImagePane 的 .task 异步加载。
-                    // 必须先把两张图的 CGImage 显式拿到，再喂给一个只用 CGImage 的快照视图。
-                    // 这里专门走 8192 长边的"保存级"高分图（而不是预览用的 6144），
-                    // 让最终 PNG 在 100% 看不糊。
-                    Task { @MainActor in
-                        let urlA = clipA.url(for: sourceA)
-                        let urlB = clipB.url(for: sourceB)
-                        async let aImg = FullImageLoader.shared.image(for: urlA, maxPixel: 8192)
-                        async let bImg = FullImageLoader.shared.image(for: urlB, maxPixel: 8192)
-                        let imgA = await aImg
-                        let imgB = await bImg
-                        // 第一张：用户当前看到的对比（带 zoom / 拖动校正），底部带"N×"角标
-                        let png = renderComparisonImage(
-                            cgImageA: imgA, cgImageB: imgB,
-                            mode: mode, zoom: zoom,
-                            panA: panA, panB: panB, curtainSplit: curtainSplit,
-                            showZoomBadge: true
-                        )
-                        // 第二张：原始未调整的对比（zoom=1，无位移，强制分屏左右摆），不带角标
-                        let originalPng = renderComparisonImage(
-                            cgImageA: imgA, cgImageB: imgB,
-                            mode: .split, zoom: 1.0,
-                            panA: .zero, panB: .zero, curtainSplit: 0.5,
-                            showZoomBadge: false
-                        )
-                        let info = buildInfo(name: name)
-                        onSaveComparison(name, png, originalPng, info)
-                    }
-                },
-                onCancel: { savePopoverPresented = false }
-            )
+    }
+
+    /// 走原生 NSSavePanel —— 名字 + 父文件夹一并选好，少一次操作。
+    private func openSavePanel() {
+        let panel = NSSavePanel()
+        panel.title = "保存 AB 对比"
+        panel.message = "选择对比集要保存到哪个文件夹"
+        panel.prompt = "保存"
+        panel.nameFieldLabel = "对比集名称："
+        panel.nameFieldStringValue = defaultSaveName()
+        panel.canCreateDirectories = true
+        panel.allowsOtherFileTypes = true
+        panel.isExtensionHidden = true
+
+        panel.begin { response in
+            guard response == .OK, let destURL = panel.url else { return }
+            Task { @MainActor in
+                await performSaveComparison(destination: destURL)
+            }
         }
     }
 
-    private func openSavePopover() {
-        saveNameDraft = defaultSaveName()
-        savePopoverPresented = true
-        focused = false
+    /// destination 是 NSSavePanel 返回的"父文件夹 / 名字"完整路径。
+    /// 我们拆出 name + parentFolder 交给上游写盘。
+    @MainActor
+    private func performSaveComparison(destination: URL) async {
+        let name = destination.lastPathComponent
+        let parent = destination.deletingLastPathComponent()
+
+        let urlA = clipA.url(for: sourceA)
+        let urlB = clipB.url(for: sourceB)
+        // 全分辨率源解码（含 EXIF 方向），高 zoom 时尽可能拿到源像素
+        async let aImg = FullImageLoader.shared.fullResolutionImage(for: urlA)
+        async let bImg = FullImageLoader.shared.fullResolutionImage(for: urlB)
+        let imgA = await aImg
+        let imgB = await bImg
+        if let imgA, let imgB {
+            print("[Comparison] sourceA: \(imgA.width)×\(imgA.height), sourceB: \(imgB.width)×\(imgB.height)")
+        }
+        // 第一张：当前视角（zoom / pan 已应用），带 "N×" 缩放徽标
+        let png = renderComparisonImage(
+            cgImageA: imgA, cgImageB: imgB,
+            mode: mode, zoom: zoom,
+            panA: panA, panB: panB, curtainSplit: curtainSplit,
+            showZoomBadge: true
+        )
+        // 第二张：未调整的对照（zoom=1，无位移，强制分屏），不带缩放徽标
+        let originalPng = renderComparisonImage(
+            cgImageA: imgA, cgImageB: imgB,
+            mode: .split, zoom: 1.0,
+            panA: .zero, panB: .zero, curtainSplit: 0.5,
+            showZoomBadge: false
+        )
+        let info = buildInfo(name: name)
+        onSaveComparison(name, parent, png, originalPng, info)
     }
 
     private func defaultSaveName() -> String {
@@ -532,10 +525,15 @@ struct ABCompareView: View {
         )
     }
 
-    /// 用 ImageRenderer 重渲染 stage（不带工具栏 / EXIF 顶栏），输出高分 PNG。
-    /// 关键：传进来的是已经异步加载完的 CGImage，快照视图同步出图，不依赖 .task。
-    /// mode/zoom/pan/curtain 由调用方指定 —— 这样 "当前对比" 和 "原始未调整对比"
-    /// 可以共用同一份渲染管线
+    /// **混合渲染管线**：
+    /// - 照片内容走 **CGContext 直接画**（pixel-perfect，无 SwiftUI/Metal cap、无半分辨率 bug）
+    /// - 角标 / 分界线 / 缩放徽标走 **SwiftUI ImageRenderer**（透明背景，只画 overlay）
+    /// - 二者用 CGContext 合成
+    ///
+    /// 这是用户提出的"先裁切后压缩"的彻底实现 —— 源 CGImage（全分辨率）被直接
+    /// 喂给 CGContext.draw(image, in:)，按 zoom/pan 计算 dstRect，CGContext 用
+    /// kCGInterpolationHigh 做必要的上下采样，最后只在落盘时做一次 JPEG 压缩。
+    /// SwiftUI ImageRenderer 在 macOS 26 上对 8K 输出有 ½ 分辨率 bug，全权绕开。
     @MainActor
     private func renderComparisonImage(
         cgImageA: CGImage?,
@@ -548,27 +546,116 @@ struct ABCompareView: View {
         showZoomBadge: Bool
     ) -> CGImage? {
         let renderSize = computedRenderSize(forMode: mode)
-        let view = ABStageSnapshotView(
-            clipA: clipA,
-            clipB: clipB,
-            cgImageA: cgImageA,
-            cgImageB: cgImageB,
-            mode: mode,
-            zoom: zoom,
-            panA: panA,
-            panB: panB,
+        let w = Int(renderSize.width)
+        let h = Int(renderSize.height)
+        guard w > 0, h > 0 else { return nil }
+
+        // —— Step 1: CGContext 画照片层（全分辨率源 → 裁切到 pane）——
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let photoCtx = CGContext(
+            data: nil, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        photoCtx.interpolationQuality = .high
+        // 翻成"top-left Y-down"，和 SwiftUI 同坐标系，公式好写
+        photoCtx.translateBy(x: 0, y: CGFloat(h))
+        photoCtx.scaleBy(x: 1, y: -1)
+
+        photoCtx.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+        photoCtx.fill(CGRect(x: 0, y: 0, width: renderSize.width, height: renderSize.height))
+
+        let paneW: CGFloat = mode == .split ? renderSize.width / 2 : renderSize.width
+        let paneH = renderSize.height
+
+        switch mode {
+        case .split:
+            let paneARect = CGRect(x: 0, y: 0, width: paneW, height: paneH)
+            let paneBRect = CGRect(x: paneW, y: 0, width: paneW, height: paneH)
+            drawPhotoCrop(in: photoCtx, image: cgImageA, paneRect: paneARect, zoom: zoom, panFraction: panA)
+            drawPhotoCrop(in: photoCtx, image: cgImageB, paneRect: paneBRect, zoom: zoom, panFraction: panB)
+            // 6 px 白线分界，opacity 0.75
+            photoCtx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.75))
+            photoCtx.fill(CGRect(x: paneW - 3, y: 0, width: 6, height: paneH))
+        case .curtain:
+            let fullPane = CGRect(x: 0, y: 0, width: renderSize.width, height: renderSize.height)
+            drawPhotoCrop(in: photoCtx, image: cgImageB, paneRect: fullPane, zoom: zoom, panFraction: panB)
+            photoCtx.saveGState()
+            photoCtx.clip(to: CGRect(x: 0, y: 0, width: renderSize.width * curtainSplit, height: renderSize.height))
+            drawPhotoCrop(in: photoCtx, image: cgImageA, paneRect: fullPane, zoom: zoom, panFraction: panA)
+            photoCtx.restoreGState()
+            let dividerX = renderSize.width * curtainSplit - 3
+            photoCtx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.75))
+            photoCtx.fill(CGRect(x: dividerX, y: 0, width: 6, height: renderSize.height))
+        }
+
+        guard let photoCanvas = photoCtx.makeImage() else { return nil }
+
+        // —— Step 2: SwiftUI overlay 层（透明背景，只有角标 + 缩放徽标）——
+        let overlay = ABStageOverlayView(
+            clipA: clipA, clipB: clipB,
+            mode: mode, zoom: zoom,
             curtainSplit: curtainSplit,
             overlaySettings: overlaySettings,
             renderSize: renderSize,
             showZoomBadge: showZoomBadge
         )
-        let renderer = ImageRenderer(content: view)
-        // scale = 1：renderSize 本身就是目标像素数（不再 ×2），
-        // 这样 SwiftUI Image 内部走的也是源 CGImage → 输出像素的 1:1 高质量插值，
-        // 不会先把图缩成小尺寸视图再拉伸。
-        renderer.scale = 1.0
+        let renderer = ImageRenderer(content: overlay)
+        renderer.scale = NSScreen.main?.backingScaleFactor ?? 2.0
         renderer.proposedSize = ProposedViewSize(width: renderSize.width, height: renderSize.height)
-        return renderer.cgImage
+        let overlayCG = renderer.cgImage
+
+        // —— Step 3: 合成 ——
+        guard let composeCtx = CGContext(
+            data: nil, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return photoCanvas }
+        composeCtx.interpolationQuality = .high
+        let fullRect = CGRect(x: 0, y: 0, width: renderSize.width, height: renderSize.height)
+        composeCtx.draw(photoCanvas, in: fullRect)
+        if let overlayCG {
+            composeCtx.draw(overlayCG, in: fullRect)
+        }
+        let finalCG = composeCtx.makeImage()
+        if let cg = finalCG {
+            print("[Comparison] requested \(w)×\(h) → output \(cg.width)×\(cg.height) (overlay \(overlayCG?.width ?? 0)×\(overlayCG?.height ?? 0))")
+        }
+        return finalCG
+    }
+
+    /// 在 CGContext 里画一张照片的"按 zoom/pan 裁切版"。
+    /// 参数全部按 SwiftUI 的 top-left Y-down 坐标，配合 photoCtx 已经做的翻转。
+    @MainActor
+    private func drawPhotoCrop(
+        in ctx: CGContext,
+        image: CGImage?,
+        paneRect: CGRect,
+        zoom: Double,
+        panFraction: CGSize
+    ) {
+        guard let image else { return }
+        let srcW = CGFloat(image.width)
+        let srcH = CGFloat(image.height)
+        // 复刻 SwiftUI 的 .scaledToFit().scaleEffect(zoom).offset(panInPt)：
+        let fitScale = min(paneRect.width / srcW, paneRect.height / srcH)
+        let displayW = srcW * fitScale * zoom
+        let displayH = srcH * fitScale * zoom
+        let panX = panFraction.width * paneRect.width * zoom
+        let panY = panFraction.height * paneRect.height * zoom
+        let dstX = paneRect.midX - displayW / 2 + panX
+        let dstY = paneRect.midY - displayH / 2 + panY
+        let dstRect = CGRect(x: dstX, y: dstY, width: displayW, height: displayH)
+
+        ctx.saveGState()
+        ctx.clip(to: paneRect)
+        // 在翻转后的 Y-down ctx 里把 image 画正：本地再翻一次
+        ctx.translateBy(x: dstRect.minX, y: dstRect.minY + dstRect.height)
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: dstRect.width, height: dstRect.height))
+        ctx.restoreGState()
     }
 
     /// 输出像素尺寸：保持 stage 比例，长边足够大。
@@ -629,65 +716,33 @@ struct ABCompareView: View {
     }
 }
 
-// MARK: - 保存对比 popover
-
-private struct SaveComparisonPopover: View {
-    @Binding var name: String
-    var onCommit: () -> Void
-    var onCancel: () -> Void
-
-    @FocusState private var nameFocused: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("保存这一次 AB 对比")
-                .font(.headline)
-            Text("给这次对比起个名字。会在你选的文件夹下建一个同名子文件夹，写入 A、B 两边的原文件和当前画面的对比截图 PNG。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            TextField("名字", text: $name)
-                .textFieldStyle(.roundedBorder)
-                .focused($nameFocused)
-                .onSubmit { onCommit() }
-                .frame(minWidth: 320)
-
-            HStack {
-                Spacer()
-                Button("取消") { onCancel() }
-                    .keyboardShortcut(.cancelAction)
-                Button("下一步：选文件夹…") { onCommit() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-        }
-        .padding(14)
-        .frame(width: 380)
-        .onAppear { nameFocused = true }
-    }
-}
-
 // MARK: - Curtain handle
 
 private struct CurtainHandle: View {
     var body: some View {
         ZStack {
+            // 中央竖线（保持纤细可见，但用半透明白匹配玻璃质感）
             Rectangle()
-                .fill(.white.opacity(0.85))
-                .frame(width: 2)
-            Circle()
-                .fill(.white)
-                .frame(width: 28, height: 28)
-                .overlay {
-                    Image(systemName: "arrow.left.and.right")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(.black)
-                }
-                .shadow(radius: 4)
+                .fill(.white.opacity(0.65))
+                .frame(width: 1.5)
+
+            // 把手胶囊：复用全局玻璃质感
+            Image(systemName: "arrow.left.and.right")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .glassCapsule()
         }
-        .frame(width: 28, height: 220)
+        .frame(width: 32, height: 220)
         .contentShape(Rectangle())
+        .onHover { hovering in
+            if hovering {
+                NSCursor.resizeLeftRight.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
     }
 }
 
@@ -759,98 +814,70 @@ private struct ExifSummaryLine: View {
     }
 }
 
-// MARK: - 对比截图重渲染视图
+// MARK: - 对比截图 SwiftUI overlay 层
 
-/// 与 `ABCompareView.imageStage` 视觉一致，但内部用同步的 CGImage 出图（不是异步 ImagePane），
-/// 这样 ImageRenderer 一次性把当前画面定格到 PNG。
-struct ABStageSnapshotView: View {
+/// 给 `renderComparisonImage` 用的"透明 overlay 层"：只画角标 + 缩放徽标，
+/// 照片区域是 Color.clear。CGContext 合成时 透明区域显示底下的照片画布。
+/// 分界线由 CGContext 画，本视图不画。
+struct ABStageOverlayView: View {
     let clipA: MediaClip
     let clipB: MediaClip
-    let cgImageA: CGImage?
-    let cgImageB: CGImage?
     let mode: ABCompareView.Mode
     let zoom: Double
-    let panA: CGSize
-    let panB: CGSize
     let curtainSplit: Double
     let overlaySettings: PreviewOverlaySettings
     let renderSize: CGSize
-    /// 是否在底部画"放大 N×"的角标。原始未调整对比图不画（永远 1×，意义不大）
-    var showZoomBadge: Bool = false
+    let showZoomBadge: Bool
 
-    /// 截图渲染时的视觉缩放倍数（角标、外圈 padding 一起放大），让 7680×4320 的大画布里也看得清。
     private let snapScale: CGFloat = 10.0
 
     var body: some View {
-        // panA/panB 是"fraction of pane size"，用快照自己的 pane 尺寸算出 pt 偏移
-        let paneSize: CGSize = {
-            switch mode {
-            case .split: return CGSize(width: renderSize.width / 2, height: renderSize.height)
-            case .curtain: return renderSize
-            }
-        }()
-        let panAPt = CGSize(width: panA.width * paneSize.width * zoom, height: panA.height * paneSize.height * zoom)
-        let panBPt = CGSize(width: panB.width * paneSize.width * zoom, height: panB.height * paneSize.height * zoom)
-
         ZStack {
-            Color.black
+            Color.clear
+
             switch mode {
             case .split:
                 HStack(spacing: 0) {
                     ZStack(alignment: .topLeading) {
-                        SyncCGImagePane(image: cgImageA, zoom: zoom, pan: panAPt)
+                        Color.clear
                             .frame(width: renderSize.width / 2, height: renderSize.height)
                         ExifOverlayBadge(
                             clip: clipA,
                             settings: overlaySettings,
                             sideLabel: "A",
                             sideTint: .blue,
-                            scale: snapScale
+                            scale: snapScale,
+                            diffWith: clipB.metadata
                         )
                         .padding(14 * snapScale)
                     }
                     .frame(width: renderSize.width / 2, height: renderSize.height)
-                    .clipped()
-
-                    // 分屏分界线在 7680 宽的 PNG 里加粗到 6 px、对比度提到 0.75，
-                    // 既清晰又不抢图
-                    Rectangle().fill(.white.opacity(0.75)).frame(width: 6)
-
                     ZStack(alignment: .topLeading) {
-                        SyncCGImagePane(image: cgImageB, zoom: zoom, pan: panBPt)
+                        Color.clear
                             .frame(width: renderSize.width / 2, height: renderSize.height)
                         ExifOverlayBadge(
                             clip: clipB,
                             settings: overlaySettings,
                             sideLabel: "B",
                             sideTint: .orange,
-                            scale: snapScale
+                            scale: snapScale,
+                            diffWith: clipA.metadata
                         )
                         .padding(14 * snapScale)
                     }
                     .frame(width: renderSize.width / 2, height: renderSize.height)
-                    .clipped()
                 }
             case .curtain:
                 ZStack(alignment: .topLeading) {
-                    SyncCGImagePane(image: cgImageB, zoom: zoom, pan: panBPt)
+                    Color.clear
                         .frame(width: renderSize.width, height: renderSize.height)
-                    SyncCGImagePane(image: cgImageA, zoom: zoom, pan: panAPt)
-                        .frame(width: renderSize.width, height: renderSize.height)
-                        .mask(alignment: .leading) {
-                            Rectangle().frame(width: renderSize.width * curtainSplit)
-                        }
-                    // 幕帘模式下也画一条分割线（截图里看得清楚两侧边界）
-                    Rectangle()
-                        .fill(.white.opacity(0.75))
-                        .frame(width: 6, height: renderSize.height)
-                        .offset(x: renderSize.width * curtainSplit - 3)
                     ExifOverlayBadge(
                         clip: clipA,
                         settings: overlaySettings,
                         sideLabel: "A",
                         sideTint: .blue,
-                        scale: snapScale
+                        scale: snapScale,
+                        diffWith: clipB.metadata
                     )
                     .padding(14 * snapScale)
                     .opacity(curtainSplit > 0.12 ? 1 : 0)
@@ -859,51 +886,25 @@ struct ABStageSnapshotView: View {
                         settings: overlaySettings,
                         sideLabel: "B",
                         sideTint: .orange,
-                        scale: snapScale
+                        scale: snapScale,
+                        diffWith: clipA.metadata
                     )
                     .padding(14 * snapScale)
                     .padding(.leading, renderSize.width * curtainSplit)
                     .opacity(curtainSplit < 0.88 ? 1 : 0)
                 }
-                .clipped()
             }
 
             if showZoomBadge {
-                // 底部居中、留 ~12% 字幕安全区。设计语言和左上 A/B 角标一致：
-                // 黑色透明底 + ultraThinMaterial 提亮 + 白色半透明描边 + 软阴影
                 VStack {
                     Spacer()
                     ZoomLevelBadge(zoom: zoom, scale: snapScale)
                     Spacer().frame(height: renderSize.height * 0.12)
                 }
                 .frame(width: renderSize.width, height: renderSize.height)
-                .allowsHitTesting(false)
             }
         }
         .frame(width: renderSize.width, height: renderSize.height)
-    }
-}
-
-/// 同步版的 ImagePane：CGImage 已经在外面加载好，这里只负责按 zoom/pan 摆位。
-/// ImageRenderer 跑这种纯同步视图能即时出图。
-private struct SyncCGImagePane: View {
-    let image: CGImage?
-    let zoom: Double
-    let pan: CGSize
-
-    var body: some View {
-        ZStack {
-            Color.black
-            if let img = image {
-                Image(decorative: img, scale: 1.0)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFit()
-                    .scaleEffect(zoom)
-                    // pan 是上游算好的 pt 偏移，直接用
-                    .offset(pan)
-            }
-        }
     }
 }
 

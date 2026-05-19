@@ -163,6 +163,9 @@ struct SinglePreviewView: View {
                     .keyboardShortcut("F", modifiers: .shift)
                 Button { onToggleFullScreen() } label: { EmptyView() }
                     .keyboardShortcut("\\", modifiers: [])
+                // ⌘W 关闭预览窗（标准 macOS 行为）
+                Button { onDismiss() } label: { EmptyView() }
+                    .keyboardShortcut("w", modifiers: .command)
             }
             .opacity(0)
             .frame(width: 0, height: 0)
@@ -189,10 +192,9 @@ struct SinglePreviewView: View {
                 }
             }
             .foregroundStyle(.white)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(.black.opacity(0.55), in: Capsule())
-            .overlay(Capsule().stroke(.white.opacity(0.25), lineWidth: 0.5))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .glassCapsule()
         }
         .buttonStyle(.plain)
         .disabled(!canToggle)
@@ -246,6 +248,8 @@ struct SinglePreviewView: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(isFavorite ? .red : .white)
                     .padding(.horizontal, 6)
+                    // 切换收藏时心形弹一下：1.0 → 1.35 → 0.95 → 1.0
+                    .symbolEffect(.bounce, value: isFavorite)
             }
             .buttonStyle(.borderless)
             .help(isFavorite ? "取消红心 (F)" : "加红心 (F)")
@@ -261,7 +265,7 @@ struct SinglePreviewView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(.regularMaterial)
+        .background(.ultraThinMaterial)
     }
 
     // MARK: - 底栏
@@ -316,7 +320,7 @@ struct SinglePreviewView: View {
         .foregroundStyle(.white)
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
-        .background(.regularMaterial)
+        .background(.ultraThinMaterial)
     }
 
     // MARK: - 手势
