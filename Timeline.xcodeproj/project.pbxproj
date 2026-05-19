@@ -6,8 +6,13 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		07B43DC52FB9A12500B2509F /* Timeline.icns in Resources */ = {isa = PBXBuildFile; fileRef = 07B43DC42FB9A12500B2509F /* Timeline.icns */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		07B43DAF2FB8ED7300B2509F /* Timeline.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Timeline.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		07B43DC42FB9A12500B2509F /* Timeline.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = Timeline/Resources/Timeline.icns; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -15,6 +20,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
+				Resources/Timeline.icns,
 			);
 			target = 07B43DAE2FB8ED7300B2509F /* Timeline */;
 		};
@@ -47,6 +53,7 @@
 			children = (
 				07B43DB12FB8ED7300B2509F /* Timeline */,
 				07B43DB02FB8ED7300B2509F /* Products */,
+				07B43DC42FB9A12500B2509F /* Timeline.icns */,
 			);
 			sourceTree = "<group>";
 		};
@@ -122,6 +129,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				07B43DC52FB9A12500B2509F /* Timeline.icns in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
