@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+._*
+
+# Xcode — build products & derived data
+build/
+DerivedData/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Xcode — per-user state (editor layout, breakpoints, scheme ordering)
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Signing — never commit these
+*.mobileprovision
+*.p12
+*.cer
+*.certSigningRequest
