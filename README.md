@@ -48,7 +48,9 @@ A RAW and a JPG sharing a basename count as **one photo**, not two.
 
 **Photos only.** Video files found while scanning are skipped and reported as a count — video support is deliberately out of scope for now.
 
-This is a tool its author uses, not a shipped product. There's no signed build and no release yet, so you build it from source. The Xcode target is still named `Timeline`, from before the project had a name it deserved.
+This is a tool its author uses, not a shipped product. There's no signed build and no release yet, so you build it from source — distributing a runnable binary needs a paid Apple Developer account for signing and notarization, which isn't in place yet.
+
+The source folder and the bundle identifier still say `Timeline`, the project's original name. That's deliberate: the document type `com.ericfang.timeline.compare` is baked into every `.timelinecompare` file already saved, and renaming it would orphan them.
 
 ## Build
 

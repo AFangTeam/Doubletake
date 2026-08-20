@@ -28,7 +28,7 @@ actor ThumbnailLoader {
             appropriateFor: nil,
             create: true
         )) ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        let bundleID = Bundle.main.bundleIdentifier ?? "Timeline"
+        let bundleID = Bundle.main.bundleIdentifier ?? "DoubleTake"
         let dir = base.appendingPathComponent(bundleID).appendingPathComponent("thumbs")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         self.diskCacheDir = dir

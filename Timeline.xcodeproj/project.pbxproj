@@ -83,10 +83,10 @@
 			fileSystemSynchronizedGroups = (
 				07B43DB12FB8ED7300B2509F /* Timeline */,
 			);
-			name = Timeline;
+			name = "Double Take";
 			packageProductDependencies = (
 			);
-			productName = Timeline;
+			productName = "Double Take";
 			productReference = 07B43DAF2FB8ED7300B2509F /* Timeline.app */;
 			productType = "com.apple.product-type.application";
 		};
@@ -289,7 +289,7 @@
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ericfang.Timeline;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "Double Take";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -320,7 +320,7 @@
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ericfang.Timeline;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "Double Take";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;

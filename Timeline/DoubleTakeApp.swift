@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct TimelineApp: App {
+struct DoubleTakeApp: App {
     @State private var prefs = PreferencesStore()
 
     var body: some Scene {
@@ -17,7 +17,7 @@ struct TimelineApp: App {
             }
         }
 
-        Window("Timeline 设置", id: "preferences") {
+        Window("Double Take 设置", id: "preferences") {
             PreferencesView()
                 .environment(prefs)
         }

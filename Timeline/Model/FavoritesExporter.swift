@@ -15,7 +15,7 @@ enum FavoritesExporter {
         to destination: URL
     ) throws -> FavoritesExportResult {
         let fm = FileManager.default
-        let dirName = "Timeline-Favorites-\(timestampString())"
+        let dirName = "DoubleTake-Favorites-\(timestampString())"
         let outDir = destination.appendingPathComponent(dirName, isDirectory: true)
         try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
 

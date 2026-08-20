@@ -50,7 +50,9 @@ JPG/JPEG · HEIC/HEIF · PNG · TIFF · RAW（ARW、CR2、CR3、NEF、NRW、RAF�
 
 **只支持照片。** 扫描时遇到的视频文件会被跳过并计数 —— 视频支持是有意暂不做的。
 
-这是作者自己在用的工具，不是已发布的产品：没有签名版本、没有 Release，需要自己从源码编译。Xcode target 现在还叫 `Timeline`，那是项目还没有一个配得上它的名字时留下的。
+这是作者自己在用的工具，不是已发布的产品：没有签名版本、没有 Release，需要自己从源码编译 —— 要分发能直接跑的二进制，需要付费的 Apple 开发者账号做签名和公证，目前还没有。
+
+源码目录和 bundle identifier 仍然写着 `Timeline`，那是项目最早的名字。这是有意保留的：文档类型 `com.ericfang.timeline.compare` 已经写进了每一个存过的 `.timelinecompare` 文件里，改掉会让它们全部认不出来。
 
 ## 编译
 
